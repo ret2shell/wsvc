@@ -1,9 +1,11 @@
+use std::path::PathBuf;
+
 use chrono::serde::ts_seconds::{deserialize as from_ts, serialize as to_ts};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
 
 #[derive(Clone, Debug)]
-pub struct ObjectId(blake3::Hash);
+pub struct ObjectId(pub blake3::Hash);
 
 impl Serialize for ObjectId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -56,7 +58,8 @@ pub struct Record {
 /// `Repository` stand for a repo.
 pub struct Repository {
     #[serde(skip_serializing, skip_deserializing)]
-    pub path: std::path::PathBuf,
+    pub path: PathBuf,
     pub head: Option<ObjectId>,
     pub records: Vec<ObjectId>,
+    pub bare: bool,
 }
