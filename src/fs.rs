@@ -6,7 +6,7 @@ use std::{
 use nanoid::nanoid;
 use thiserror::Error;
 
-use super::model::{Blob, ObjectId, Repository};
+use super::model::{Blob, ObjectId, Repository, Tree};
 
 #[derive(Error, Debug)]
 pub enum WsvcFsError {
@@ -20,6 +20,14 @@ pub enum WsvcFsError {
     UnknownPath(String),
     #[error("unknown fs error")]
     Unknown,
+    #[error("serialize failed")]
+    SerializeFailed,
+    #[error("deserialize failed")]
+    DeserializeFailed,
+    #[error("invalid filename")]
+    InvalidFilename,
+    #[error("invalid OsString")]
+    InvalidOsString,
 }
 
 impl Repository {
@@ -59,8 +67,10 @@ impl Repository {
         Ok(Blob {
             name: rel_path
                 .as_ref()
+                .file_name()
+                .ok_or(WsvcFsError::InvalidFilename)?
                 .to_str()
-                .ok_or(WsvcFsError::InvalidPath)?
+                .ok_or(WsvcFsError::InvalidOsString)?
                 .to_string(),
             hash: ObjectId(hash),
         })
@@ -125,5 +135,48 @@ impl Repository {
             );
         }
         Ok(result)
+    }
+
+    pub fn write_tree_file(&self, rel_path: impl AsRef<Path>) -> Result<Tree, WsvcFsError> {
+        let path = rel_path.as_ref();
+        let entries = std::fs::read_dir(path)?;
+        let mut trees = vec![];
+        let mut blobs = vec![];
+
+        for entry in entries {
+            let entry = entry?;
+
+            let entry_type = entry.file_type()?;
+            if entry_type.is_dir() {
+                if entry.file_name() == ".wsvc" {
+                    continue;
+                }
+                trees.push(self.write_tree_file(entry.path())?.hash);
+            } else if entry_type.is_file() {
+                blobs.push(self.write_blob_file(entry.path())?);
+            }
+        }
+
+        let name = path
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new(""))
+            .to_str()
+            .ok_or(WsvcFsError::InvalidOsString)?;
+
+        let hash = blake3::hash(format!("{}:{:?}:{:?}", name, trees, blobs).as_bytes());
+
+        let tree = Tree {
+            name: name.to_string(),
+            hash: ObjectId(hash),
+            trees: trees,
+            blobs: blobs,
+        };
+
+        std::fs::write(
+            self.root_dir().join("trees").join(hash.to_string()),
+            serde_json::to_vec(&tree).map_err(|_| WsvcFsError::SerializeFailed)?,
+        )?;
+
+        Ok(tree)
     }
 }

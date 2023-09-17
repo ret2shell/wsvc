@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use chrono::serde::ts_seconds::{deserialize as from_ts, serialize as to_ts};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, Debug)]
 pub struct ObjectId(pub blake3::Hash);
@@ -40,7 +40,7 @@ pub struct Tree {
     pub name: String,
     pub hash: ObjectId,
     pub trees: Vec<ObjectId>,
-    pub blobs: Vec<ObjectId>,
+    pub blobs: Vec<Blob>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
