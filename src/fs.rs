@@ -169,10 +169,10 @@ impl Repository {
         Ok(tree)
     }
 
-    pub fn checkout_root_tree<'a, 'b: 'a>(
-        &'b self,
+    pub fn checkout_root_tree(
+        &self,
         explicit_root: Option<impl AsRef<Path>>,
-        tree_id: &'a ObjectId,
+        tree_id: &ObjectId,
     ) -> Result<(), WsvcFsError> {
         let explicit_root = self.get_explicit_root(explicit_root)?;
 
