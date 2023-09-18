@@ -169,10 +169,10 @@ impl Repository {
         Ok(tree)
     }
 
-    pub fn checkout_root_tree(
-        &self,
+    pub fn checkout_root_tree<'a, 'b: 'a>(
+        &'b self,
         explicit_root: Option<impl AsRef<Path>>,
-        tree_id: ObjectId,
+        tree_id: &'a ObjectId,
     ) -> Result<(), WsvcFsError> {
         let explicit_root = self.get_explicit_root(explicit_root)?;
 
@@ -303,6 +303,27 @@ impl Repository {
             self.root_dir().join("records").join(hash.to_string()),
             serde_json::to_vec(&record).map_err(|_| WsvcFsError::SerializeFailed)?,
         )?;
+        Ok(record)
+    }
+
+    pub fn checkout_record(
+        &self,
+        explicit_root: Option<impl AsRef<Path>>,
+        record_id: ObjectId,
+    ) -> Result<Record, WsvcFsError> {
+        let explicit_root = self.get_explicit_root(explicit_root)?;
+
+        let record_file = std::fs::File::open(
+            self.root_dir()
+                .join("records")
+                .join(record_id.0.to_string()),
+        )?;
+
+        let record: Record =
+            serde_json::from_reader(record_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
+
+        self.checkout_root_tree(Some(explicit_root), &record.root)?;
+
         Ok(record)
     }
 }
