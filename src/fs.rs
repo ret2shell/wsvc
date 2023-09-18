@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -79,16 +80,9 @@ impl Repository {
     pub fn checkout_blob_file(
         &self,
         blob: &Blob,
-        explicit_root: Option<impl AsRef<Path>>,
+        rel_path: impl AsRef<Path>,
     ) -> Result<(), WsvcFsError> {
-        if explicit_root.is_none() && self.bare {
-            return Err(WsvcFsError::UnknownPath(
-                "explicit root dir should be specified in bare repo".to_string(),
-            ));
-        }
-        let explicit_root = explicit_root
-            .map(|p| p.as_ref().to_path_buf())
-            .unwrap_or_else(|| self.path.clone());
+        let rel_path = rel_path.as_ref();
         let blob_path = self
             .root_dir()
             .join("objects")
@@ -107,12 +101,7 @@ impl Repository {
                     .map_err(|_| WsvcFsError::DecompressFailed)?,
             )?;
         }
-        let rel_path = PathBuf::from(blob.name.clone());
-        let target_path = explicit_root.join(rel_path);
-        if !target_path.exists() {
-            std::fs::create_dir_all(target_path.parent().ok_or(WsvcFsError::InvalidPath)?)?;
-        }
-        std::fs::copy(&decompressed_file_path, &target_path)?;
+        std::fs::copy(&decompressed_file_path, rel_path)?;
         Ok(())
     }
 
@@ -178,5 +167,122 @@ impl Repository {
         )?;
 
         Ok(tree)
+    }
+
+    pub fn checkout_root_tree(
+        &self,
+        explicit_root: Option<impl AsRef<Path>>,
+        tree_id: ObjectId,
+    ) -> Result<(), WsvcFsError> {
+        if explicit_root.is_none() && self.bare {
+            return Err(WsvcFsError::UnknownPath(
+                "explicit root dir should be specified in bare repo".to_string(),
+            ));
+        }
+        let explicit_root = explicit_root
+            .map(|p| p.as_ref().to_path_buf())
+            .unwrap_or_else(|| self.path.clone());
+
+        let root_tree_file =
+            std::fs::File::open(self.root_dir().join("trees").join(tree_id.0.to_string()))?;
+
+        let root_tree: Tree =
+            serde_json::from_reader(root_tree_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
+
+        self.checkout_tree(explicit_root, root_tree)?;
+
+        Ok(())
+    }
+
+    fn checkout_subtree(
+        &self,
+        parent_path: impl AsRef<Path>,
+        tree_id: ObjectId,
+    ) -> Result<String, WsvcFsError> {
+        let subtree_file =
+            std::fs::File::open(self.root_dir().join("trees").join(tree_id.0.to_string()))?;
+
+        let subtree: Tree =
+            serde_json::from_reader(subtree_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
+
+        let subtree_path = parent_path.as_ref().join(&subtree.name);
+
+        if !subtree_path.exists() {
+            std::fs::create_dir(&subtree_path)?;
+        }
+
+        self.checkout_tree(subtree_path, subtree)
+    }
+
+    fn checkout_tree(
+        &self,
+        tree_path: impl AsRef<Path>,
+        tree: Tree,
+    ) -> Result<String, WsvcFsError> {
+        let mut subtree_name_set = HashSet::with_capacity(tree.trees.len());
+        for sub_tree_id in tree.trees {
+            subtree_name_set.insert(self.checkout_subtree(&tree_path, sub_tree_id)?);
+        }
+
+        let mut blob_name_set: HashMap<_, _> = tree
+            .blobs
+            .into_iter()
+            .map(|x| (x.name.clone(), x))
+            .collect();
+
+        let entries = std::fs::read_dir(&tree_path)?;
+
+        for entry in entries {
+            let entry = entry?;
+
+            let entry_name = entry
+                .file_name()
+                .to_str()
+                .ok_or(WsvcFsError::InvalidOsString)?
+                .to_string();
+
+            let entry_type = entry.file_type()?;
+
+            if entry_type.is_dir() {
+                if entry_name != ".wsvc" && !subtree_name_set.contains(&entry_name) {
+                    std::fs::remove_dir_all(entry.path())?;
+                }
+            }
+
+            if entry_type.is_file() {
+                match blob_name_set.remove(&entry_name) {
+                    Some(x) => {
+                        if !x.verify(entry.path())? {
+                            self.checkout_blob_file(&x, entry.path())?;
+                        }
+                    }
+                    None => {
+                        std::fs::remove_file(entry.path())?;
+                    }
+                }
+            }
+        }
+
+        for b in blob_name_set {
+            self.checkout_blob_file(&b.1, tree_path.as_ref().join(b.0))?;
+        }
+
+        Ok(tree.name)
+    }
+}
+
+impl Blob {
+    fn verify(&self, rel_path: impl AsRef<Path>) -> Result<bool, WsvcFsError> {
+        let mut file = std::fs::File::open(rel_path)?;
+        let mut buffer: [u8; 1024] = [0; 1024];
+        let mut hasher = blake3::Hasher::new();
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(hasher.finalize() == self.hash.0)
     }
 }
