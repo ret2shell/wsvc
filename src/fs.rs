@@ -7,7 +7,7 @@ use std::{
 use nanoid::nanoid;
 use thiserror::Error;
 
-use super::model::{Blob, ObjectId, Repository, Tree};
+use super::model::{Blob, ObjectId, Record, Repository, Tree};
 
 #[derive(Error, Debug)]
 pub enum WsvcFsError {
@@ -174,14 +174,7 @@ impl Repository {
         explicit_root: Option<impl AsRef<Path>>,
         tree_id: ObjectId,
     ) -> Result<(), WsvcFsError> {
-        if explicit_root.is_none() && self.bare {
-            return Err(WsvcFsError::UnknownPath(
-                "explicit root dir should be specified in bare repo".to_string(),
-            ));
-        }
-        let explicit_root = explicit_root
-            .map(|p| p.as_ref().to_path_buf())
-            .unwrap_or_else(|| self.path.clone());
+        let explicit_root = self.get_explicit_root(explicit_root)?;
 
         let root_tree_file =
             std::fs::File::open(self.root_dir().join("trees").join(tree_id.0.to_string()))?;
@@ -268,6 +261,49 @@ impl Repository {
         }
 
         Ok(tree.name)
+    }
+
+    fn get_explicit_root(
+        &self,
+        explicit_root: Option<impl AsRef<Path>>,
+    ) -> Result<PathBuf, WsvcFsError> {
+        if explicit_root.is_none() && self.bare {
+            return Err(WsvcFsError::UnknownPath(
+                "explicit root dir should be specified in bare repo".to_string(),
+            ));
+        }
+        Ok(explicit_root
+            .map(|p| p.as_ref().to_path_buf())
+            .unwrap_or_else(|| self.path.clone()))
+    }
+
+    pub fn create_record(
+        &self,
+        explicit_root: Option<impl AsRef<Path>>,
+        message: String,
+        author: String,
+    ) -> Result<Record, WsvcFsError> {
+        let explicit_root = self.get_explicit_root(explicit_root)?;
+
+        let root = self.write_tree_file(explicit_root)?.hash;
+
+        let date = chrono::Utc::now();
+
+        let hash = blake3::hash(format!("{}:{}:{:?}:{:?}", message, author, date, root).as_bytes());
+
+        let record = Record {
+            hash: ObjectId(hash),
+            author,
+            message,
+            date,
+            root,
+        };
+
+        std::fs::write(
+            self.root_dir().join("records").join(hash.to_string()),
+            serde_json::to_vec(&record).map_err(|_| WsvcFsError::SerializeFailed)?,
+        )?;
+        Ok(record)
     }
 }
 
