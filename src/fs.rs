@@ -413,7 +413,7 @@ impl Repository {
                 create_dir_all(&tree_path).await?;
             }
             if let Some(pos) = dirs.iter().position(|p| p.eq(&tree_path)) {
-                println!("found, should not remove {:?}", dirs[pos]);
+                // println!("found, should not remove {:?}", dirs[pos]);
                 dirs.remove(pos);
             }
             self.checkout_tree(&tree, &tree_path).await?;
