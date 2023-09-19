@@ -56,7 +56,9 @@ enum Cli {
     Logs {
         #[clap(short, long)]
         root: Option<String>,
+        #[clap(short, long)]
         skip: Option<usize>,
+        #[clap(short, long)]
         limit: Option<usize>,
     },
 }
@@ -136,7 +138,27 @@ async fn checkout(hash: Option<String>, workspace: Option<String>, root: Option<
         exit(-1);
     }
     if let Some(hash) = hash {
-        repo.checkout_record(&hash.try_into().expect("failed to parse hash"), &workspace)
+        let hash = hash.to_ascii_lowercase();
+        let records = repo.get_records().await.expect("failed to get records");
+        let records = records
+            .iter()
+            .filter(|h| h.hash.0.to_hex().to_ascii_lowercase().starts_with(&hash))
+            .collect::<Vec<_>>();
+        if records.len() == 0 {
+            println!("no commit found");
+            exit(-1);
+        }
+        if records.len() > 1 {
+            println!("more than one commit found:");
+            for record in records.iter() {
+                println!(
+                    "Record {:?} by {}\nAt: {}\nMessage: {}\n",
+                    record.hash, record.author, record.date, record.message
+                );
+            }
+            exit(-1);
+        }
+        repo.checkout_record(&&records[0].hash, &workspace)
             .await
             .expect("failed to checkout record");
     } else {
@@ -189,7 +211,6 @@ async fn logs(root: Option<String>, skip: Option<usize>, limit: Option<usize>) {
     let limit = limit.unwrap_or(10);
     let mut records = repo.get_records().await.expect("failed to get records");
     records.sort_by(|a, b| b.date.cmp(&a.date));
-    records.reverse();
     for record in records.iter().skip(skip).take(limit) {
         println!(
             "Record {:?} by {}\nAt: {}\nMessage: {}\n",

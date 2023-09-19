@@ -367,6 +367,7 @@ impl Repository {
         // collect files to be deleted
         // delete files that not in the tree or hash not match
         let mut entries = read_dir(workspace).await?;
+        let mut dirs = vec![];
         while let Some(entry) = entries.next_entry().await? {
             let entry_type = entry.file_type().await?;
             if entry_type.is_file() {
@@ -396,6 +397,11 @@ impl Repository {
                     )
                     .await?;
                 }
+            } else {
+                if entry.file_name() == ".wsvc" {
+                    continue;
+                }
+                dirs.push(entry.path());
             }
         }
 
@@ -406,9 +412,19 @@ impl Repository {
             if !tree_path.exists() {
                 create_dir_all(&tree_path).await?;
             }
+            if let Some(pos) = dirs.iter().position(|p| p.eq(&tree_path)) {
+                println!("found, should not remove {:?}", dirs[pos]);
+                dirs.remove(pos);
+            }
             self.checkout_tree(&tree, &tree_path).await?;
         }
+        // remove dirs
+        for dir in dirs {
+            // println!("remove dir {:?}", dir);
+            tokio::fs::remove_dir_all(dir).await?;
+        }
         for blob in &tree.blobs {
+            // println!("should checkout blob: {:?}", blob);
             self.checkout_blob(&blob.hash, &workspace, &blob.name)
                 .await?;
         }
