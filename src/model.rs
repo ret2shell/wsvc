@@ -59,7 +59,5 @@ pub struct Record {
 pub struct Repository {
     #[serde(skip_serializing, skip_deserializing)]
     pub path: PathBuf,
-    pub head: Option<ObjectId>,
-    pub records: Vec<ObjectId>,
     pub bare: bool,
 }

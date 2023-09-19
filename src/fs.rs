@@ -299,10 +299,15 @@ impl Repository {
             root,
         };
 
+        let record_json = serde_json::to_vec(&record).map_err(|_| WsvcFsError::SerializeFailed)?;
+
         std::fs::write(
             self.root_dir().join("records").join(hash.to_string()),
-            serde_json::to_vec(&record).map_err(|_| WsvcFsError::SerializeFailed)?,
+            &record_json,
         )?;
+
+        std::fs::write(self.root_dir().join("HEAD"), &record_json)?;
+
         Ok(record)
     }
 
@@ -313,16 +318,19 @@ impl Repository {
     ) -> Result<Record, WsvcFsError> {
         let explicit_root = self.get_explicit_root(explicit_root)?;
 
-        let record_file = std::fs::File::open(
-            self.root_dir()
-                .join("records")
-                .join(record_id.0.to_string()),
-        )?;
+        let record_path = self
+            .root_dir()
+            .join("records")
+            .join(record_id.0.to_string());
+
+        let record_file = std::fs::File::open(&record_path)?;
 
         let record: Record =
             serde_json::from_reader(record_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
 
         self.checkout_root_tree(Some(explicit_root), &record.root)?;
+
+        std::fs::copy(record_path, self.root_dir().join("HEAD"))?;
 
         Ok(record)
     }
