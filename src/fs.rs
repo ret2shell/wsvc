@@ -1,13 +1,17 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
+use blake3::{Hash, HexError};
+use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
+use tokio::{
+    fs::{create_dir_all, read_dir, remove_file, rename, write, File},
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
-use super::model::{Blob, ObjectId, Record, Repository, Tree};
+use crate::model::Record;
+
+use super::model::{Blob, ObjectId, Repository, Tree};
 
 #[derive(Error, Debug)]
 pub enum WsvcFsError {
@@ -16,9 +20,11 @@ pub enum WsvcFsError {
     #[error("invalid path")]
     InvalidPath,
     #[error("decompress error")]
-    DecompressFailed,
+    DecompressFailed(String),
     #[error("unknown path")]
     UnknownPath(String),
+    #[error("invalid hex string")]
+    InvalidHexString(#[from] HexError),
     #[error("unknown fs error")]
     Unknown,
     #[error("serialize failed")]
@@ -29,42 +35,253 @@ pub enum WsvcFsError {
     InvalidFilename,
     #[error("invalid OsString")]
     InvalidOsString,
+    #[error("dir already exists")]
+    DirAlreadyExists,
+}
+
+#[derive(Clone, Debug)]
+struct TreeImpl {
+    name: String,
+    trees: Vec<TreeImpl>,
+    blobs: Vec<Blob>,
+}
+
+async fn store_blob_file_impl(
+    path: impl AsRef<Path>,
+    objects_dir: impl AsRef<Path>,
+    temp: impl AsRef<Path>,
+) -> Result<ObjectId, WsvcFsError> {
+    if !temp.as_ref().exists() {
+        create_dir_all(temp.as_ref()).await?;
+    }
+    let mut buffer: [u8; 1024] = [0; 1024];
+    let mut file = File::open(&path).await?;
+    let compressed_file_path = temp.as_ref().join(nanoid!());
+    let mut compressed_file = File::create(&compressed_file_path).await?;
+    let mut hasher = blake3::Hasher::new();
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+        let compressed_data = compress_to_vec(&buffer[..n], 8);
+        compressed_file
+            .write_all(&[
+                0x78,
+                0xda,
+                (&compressed_data.len() / 256).try_into().unwrap(),
+                (&compressed_data.len() % 256).try_into().unwrap(),
+            ])
+            .await?;
+        compressed_file.write_all(&compressed_data).await?;
+    }
+    let hash = hasher.finalize();
+    let blob = objects_dir.as_ref().join(hash.to_hex().as_str());
+    rename(&compressed_file_path, &blob).await?;
+    Ok(ObjectId(hash))
+}
+
+async fn checkout_blob_file_impl(
+    path: impl AsRef<Path>,
+    objects_dir: impl AsRef<Path>,
+    blob_hash: &ObjectId,
+    temp: impl AsRef<Path>,
+) -> Result<(), WsvcFsError> {
+    let blob_path = objects_dir.as_ref().join(blob_hash.0.to_hex().as_str());
+    let mut buffer: [u8; 2048] = [0; 2048];
+    let mut header_buffer: [u8; 4] = [0; 4];
+    let mut file = File::open(&blob_path).await?;
+    let decompressed_file_path = temp.as_ref().join(nanoid!());
+    let mut decompressed_file = File::create(&decompressed_file_path).await?;
+    loop {
+        let n = file.read(&mut header_buffer).await?;
+        if n == 0 {
+            break;
+        }
+        if header_buffer[0] != 0x78 || header_buffer[1] != 0xda {
+            return Err(WsvcFsError::DecompressFailed(
+                "magic header not match".to_owned(),
+            ));
+        }
+        let size = (header_buffer[2] as usize) * 256 + (header_buffer[3] as usize);
+        let n = file.read(&mut buffer[..size]).await?;
+        if n != size {
+            return Err(WsvcFsError::DecompressFailed("broken chunk".to_owned()));
+        }
+        decompressed_file
+            .write_all(
+                &decompress_to_vec(&buffer[..n])
+                    .map_err(|_| WsvcFsError::DecompressFailed("decode chunk failed".to_owned()))?,
+            )
+            .await?;
+    }
+    rename(&decompressed_file_path, path).await?;
+    Ok(())
+}
+
+#[async_recursion::async_recursion(?Send)]
+async fn store_tree_file_impl(tree: TreeImpl, trees_dir: &Path) -> Result<Tree, WsvcFsError> {
+    let mut result = Tree {
+        name: tree.name,
+        hash: ObjectId(Hash::from([0; 32])),
+        trees: vec![],
+        blobs: tree.blobs.clone(),
+    };
+    for tree in tree.trees {
+        result
+            .trees
+            .push(store_tree_file_impl(tree, trees_dir.clone()).await?.hash);
+    }
+    let hash = blake3::hash(
+        serde_json::to_vec(&result)
+            .map_err(|_| WsvcFsError::SerializeFailed)?
+            .as_slice(),
+    );
+    result.hash = ObjectId(hash);
+    write(
+        trees_dir.join(hash.to_string()),
+        serde_json::to_vec(&result).map_err(|_| WsvcFsError::SerializeFailed)?,
+    )
+    .await?;
+
+    Ok(result)
+}
+
+#[async_recursion::async_recursion(?Send)]
+async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsError> {
+    let mut result = TreeImpl {
+        name: work_dir
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new("."))
+            .to_str()
+            .ok_or(WsvcFsError::InvalidOsString)?
+            .to_string(),
+        trees: vec![],
+        blobs: vec![],
+    };
+    let mut entries = read_dir(work_dir.clone()).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        // println!("{:?}", entry);
+        let entry_type = entry.file_type().await?;
+        if entry_type.is_dir() {
+            if entry.file_name() == ".wsvc" {
+                continue;
+            }
+            result
+                .trees
+                .push(build_tree(root.clone(), &entry.path()).await?);
+        } else if entry_type.is_file() {
+            result.blobs.push(
+                Blob {
+                    name: entry
+                        .file_name()
+                        .to_str()
+                        .ok_or(WsvcFsError::InvalidOsString)?
+                        .to_string(),
+                    hash: store_blob_file_impl(
+                        &entry.path(),
+                        &root.join("objects"),
+                        &root.join("temp"),
+                    )
+                    .await?,
+                }
+                .clone(),
+            );
+        }
+    }
+    Ok(result)
 }
 
 impl Repository {
-    pub fn root_dir(&self) -> PathBuf {
-        if self.bare {
-            self.path.clone()
+    pub async fn new(path: impl AsRef<Path>, is_bare: bool) -> Result<Self, WsvcFsError> {
+        let mut path = path.as_ref().to_owned();
+        if !is_bare {
+            path = path.join(".wsvc");
+        }
+        if !path.exists() {
+            create_dir_all(path.join("objects")).await?;
+            create_dir_all(path.join("trees")).await?;
+            create_dir_all(path.join("records")).await?;
+            write(path.join("HEAD"), "").await?;
         } else {
-            self.path.join(".wsvc")
+            return Err(WsvcFsError::DirAlreadyExists);
+        }
+        Ok(Self { path })
+    }
+
+    pub async fn open(path: impl AsRef<Path>, is_bare: bool) -> Result<Self, WsvcFsError> {
+        let mut path = path.as_ref().to_owned();
+        if !is_bare {
+            path = path.join(".wsvc");
+        }
+        if !path.exists() {
+            return Err(WsvcFsError::UnknownPath(
+                path.to_str()
+                    .ok_or(WsvcFsError::InvalidOsString)?
+                    .to_string(),
+            ));
+        }
+        if path.join("objects").exists()
+            && path.join("trees").exists()
+            && path.join("records").exists()
+            && path.join("HEAD").exists()
+        {
+            Ok(Self { path })
+        } else {
+            Err(WsvcFsError::UnknownPath(
+                path.to_str()
+                    .ok_or(WsvcFsError::InvalidOsString)?
+                    .to_string(),
+            ))
         }
     }
 
-    pub fn tmp_dir(&self) -> Result<PathBuf, WsvcFsError> {
-        let result = self.root_dir().join("tmp");
+    pub async fn try_open(path: impl AsRef<Path>) -> Result<Self, WsvcFsError> {
+        if let Ok(repo) = Repository::open(&path, false).await {
+            Ok(repo)
+        } else {
+            Repository::open(&path, true).await
+        }
+    }
+
+    pub async fn temp_dir(&self) -> Result<PathBuf, WsvcFsError> {
+        let result = self.path.join("temp");
         if !result.exists() {
-            std::fs::create_dir_all(&result)?;
+            create_dir_all(&result).await?;
         }
         Ok(result)
     }
 
-    pub fn write_blob_file(&self, rel_path: impl AsRef<Path>) -> Result<Blob, WsvcFsError> {
-        let mut buffer: [u8; 1024] = [0; 1024];
-        let mut file = std::fs::File::open(&rel_path)?;
-        let compressed_file_path = self.tmp_dir()?.join(nanoid!());
-        let mut compressed_file = std::fs::File::create(&compressed_file_path)?;
-        let mut hasher = blake3::Hasher::new();
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-            compressed_file.write_all(&miniz_oxide::deflate::compress_to_vec(&buffer[..n], 8))?;
+    pub async fn objects_dir(&self) -> Result<PathBuf, WsvcFsError> {
+        let result = self.path.join("objects");
+        if !result.exists() {
+            create_dir_all(&result).await?;
         }
-        let hash = hasher.finalize();
-        let blob = self.root_dir().join("objects").join(hash.to_hex().as_str());
-        std::fs::copy(&compressed_file_path, &blob)?;
+        Ok(result)
+    }
+
+    pub async fn trees_dir(&self) -> Result<PathBuf, WsvcFsError> {
+        let result = self.path.join("trees");
+        if !result.exists() {
+            create_dir_all(&result).await?;
+        }
+        Ok(result)
+    }
+
+    pub async fn records_dir(&self) -> Result<PathBuf, WsvcFsError> {
+        let result = self.path.join("records");
+        if !result.exists() {
+            create_dir_all(&result).await?;
+        }
+        Ok(result)
+    }
+
+    pub async fn store_blob(
+        &self,
+        workspace: impl AsRef<Path>,
+        rel_path: impl AsRef<Path>,
+    ) -> Result<Blob, WsvcFsError> {
         Ok(Blob {
             name: rel_path
                 .as_ref()
@@ -73,276 +290,246 @@ impl Repository {
                 .to_str()
                 .ok_or(WsvcFsError::InvalidOsString)?
                 .to_string(),
-            hash: ObjectId(hash),
+            hash: store_blob_file_impl(
+                workspace.as_ref().join(rel_path),
+                &self.objects_dir().await?,
+                &self.temp_dir().await?,
+            )
+            .await?,
         })
     }
 
-    pub fn checkout_blob_file(
+    pub async fn checkout_blob(
         &self,
-        blob: &Blob,
+        blob_hash: &ObjectId,
+        workspace: impl AsRef<Path>,
         rel_path: impl AsRef<Path>,
     ) -> Result<(), WsvcFsError> {
-        let rel_path = rel_path.as_ref();
-        let blob_path = self
-            .root_dir()
-            .join("objects")
-            .join(blob.hash.0.to_hex().as_str());
-        let mut buffer: [u8; 1024] = [0; 1024];
-        let mut file = std::fs::File::open(&blob_path)?;
-        let decompressed_file_path = self.tmp_dir()?.join(nanoid!());
-        let mut decompressed_file = std::fs::File::create(&decompressed_file_path)?;
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            decompressed_file.write_all(
-                &miniz_oxide::inflate::decompress_to_vec(&buffer[..n])
-                    .map_err(|_| WsvcFsError::DecompressFailed)?,
-            )?;
-        }
-        std::fs::copy(&decompressed_file_path, rel_path)?;
-        Ok(())
+        checkout_blob_file_impl(
+            &workspace.as_ref().join(rel_path),
+            &self.objects_dir().await?,
+            &blob_hash,
+            &self.temp_dir().await?,
+        )
+        .await
     }
 
-    pub fn checkout_blob_data(&self, blob: &Blob) -> Result<Vec<u8>, WsvcFsError> {
+    pub async fn read_blob(&self, blob_hash: &ObjectId) -> Result<Vec<u8>, WsvcFsError> {
         let blob_path = self
-            .root_dir()
-            .join("objects")
-            .join(blob.hash.0.to_hex().as_str());
+            .objects_dir()
+            .await?
+            .join(blob_hash.0.to_hex().as_str());
         let mut buffer: [u8; 1024] = [0; 1024];
-        let mut file = std::fs::File::open(&blob_path)?;
+        let mut header_buffer: [u8; 4] = [0; 4];
+        let mut file = File::open(&blob_path).await?;
         let mut result = Vec::new();
         loop {
-            let n = file.read(&mut buffer)?;
+            let n = file.read(&mut header_buffer).await?;
             if n == 0 {
                 break;
             }
-            result.extend_from_slice(
-                &miniz_oxide::inflate::decompress_to_vec(&buffer[..n])
-                    .map_err(|_| WsvcFsError::DecompressFailed)?,
-            );
+            if header_buffer[0] != 0x78 || header_buffer[1] != 0xda {
+                return Err(WsvcFsError::DecompressFailed(
+                    "magic header not match".to_owned(),
+                ));
+            }
+            let size = (header_buffer[2] as usize) * 256 + (header_buffer[3] as usize);
+            let n = file.read(&mut buffer[..size]).await?;
+            if n != size {
+                return Err(WsvcFsError::DecompressFailed("broken chunk".to_owned()));
+            }
+            result
+                .extend_from_slice(&decompress_to_vec(&buffer[..n]).map_err(|_| {
+                    WsvcFsError::DecompressFailed("decode chunk failed".to_owned())
+                })?);
         }
         Ok(result)
     }
 
-    pub fn write_tree_file(&self, rel_path: impl AsRef<Path>) -> Result<Tree, WsvcFsError> {
-        let path = rel_path.as_ref();
-        let entries = std::fs::read_dir(path)?;
-        let mut trees = vec![];
-        let mut blobs = vec![];
+    pub async fn write_tree_recursively(
+        &self,
+        workspace: impl AsRef<Path> + Clone,
+    ) -> Result<Tree, WsvcFsError> {
+        let stored_tree = build_tree(&self.path, workspace.as_ref()).await?;
+        let result = store_tree_file_impl(stored_tree, &self.trees_dir().await?).await?;
+        Ok(result)
+    }
 
-        for entry in entries {
-            let entry = entry?;
+    pub async fn read_tree(&self, tree_hash: &ObjectId) -> Result<Tree, WsvcFsError> {
+        let tree_path = self.trees_dir().await?.join(tree_hash.0.to_hex().as_str());
+        let result = serde_json::from_slice::<Tree>(&tokio::fs::read(tree_path).await?)
+            .map_err(|_| WsvcFsError::DeserializeFailed)?;
+        Ok(result)
+    }
 
-            let entry_type = entry.file_type()?;
-            if entry_type.is_dir() {
-                if entry.file_name() == ".wsvc" {
-                    continue;
+    #[async_recursion::async_recursion(?Send)]
+    pub async fn checkout_tree(&self, tree: &Tree, workspace: &Path) -> Result<(), WsvcFsError> {
+        // collect files to be deleted
+        // delete files that not in the tree or hash not match
+        let mut entries = read_dir(workspace).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_type = entry.file_type().await?;
+            if entry_type.is_file() {
+                let mut found = false;
+                for blob in &tree.blobs {
+                    if blob.name
+                        == entry
+                            .file_name()
+                            .to_str()
+                            .ok_or(WsvcFsError::InvalidOsString)?
+                    {
+                        if !blob.checksum(workspace.join(&blob.name)).await? {
+                            remove_file(workspace.join(&blob.name)).await?;
+                        }
+                        found = true;
+                        break;
+                    }
                 }
-                trees.push(self.write_tree_file(entry.path())?.hash);
-            } else if entry_type.is_file() {
-                blobs.push(self.write_blob_file(entry.path())?);
+                if !found {
+                    remove_file(
+                        workspace.join(
+                            entry
+                                .file_name()
+                                .to_str()
+                                .ok_or(WsvcFsError::InvalidOsString)?,
+                        ),
+                    )
+                    .await?;
+                }
             }
         }
 
-        let name = path
-            .file_name()
-            .unwrap_or(std::ffi::OsStr::new(""))
-            .to_str()
-            .ok_or(WsvcFsError::InvalidOsString)?;
-
-        let hash = blake3::hash(format!("{}:{:?}:{:?}", name, trees, blobs).as_bytes());
-
-        let tree = Tree {
-            name: name.to_string(),
-            hash: ObjectId(hash),
-            trees: trees,
-            blobs: blobs,
-        };
-
-        std::fs::write(
-            self.root_dir().join("trees").join(hash.to_string()),
-            serde_json::to_vec(&tree).map_err(|_| WsvcFsError::SerializeFailed)?,
-        )?;
-
-        Ok(tree)
-    }
-
-    pub fn checkout_root_tree(
-        &self,
-        explicit_root: Option<impl AsRef<Path>>,
-        tree_id: &ObjectId,
-    ) -> Result<(), WsvcFsError> {
-        let explicit_root = self.get_explicit_root(explicit_root)?;
-
-        let root_tree_file =
-            std::fs::File::open(self.root_dir().join("trees").join(tree_id.0.to_string()))?;
-
-        let root_tree: Tree =
-            serde_json::from_reader(root_tree_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
-
-        self.checkout_tree(explicit_root, root_tree)?;
-
+        // checkout trees
+        for tree in &tree.trees {
+            let tree = self.read_tree(tree).await?;
+            let tree_path = workspace.join(&tree.name);
+            if !tree_path.exists() {
+                create_dir_all(&tree_path).await?;
+            }
+            self.checkout_tree(&tree, &tree_path).await?;
+        }
+        for blob in &tree.blobs {
+            self.checkout_blob(&blob.hash, &workspace, &blob.name)
+                .await?;
+        }
         Ok(())
     }
 
-    fn checkout_subtree(
-        &self,
-        parent_path: impl AsRef<Path>,
-        tree_id: ObjectId,
-    ) -> Result<String, WsvcFsError> {
-        let subtree_file =
-            std::fs::File::open(self.root_dir().join("trees").join(tree_id.0.to_string()))?;
-
-        let subtree: Tree =
-            serde_json::from_reader(subtree_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
-
-        let subtree_path = parent_path.as_ref().join(&subtree.name);
-
-        if !subtree_path.exists() {
-            std::fs::create_dir(&subtree_path)?;
-        }
-
-        self.checkout_tree(subtree_path, subtree)
+    pub async fn store_record(&self, record: &Record) -> Result<(), WsvcFsError> {
+        let record_path = self
+            .records_dir()
+            .await?
+            .join(record.hash.0.to_hex().as_str());
+        write(
+            record_path,
+            serde_json::to_vec(record).map_err(|_| WsvcFsError::SerializeFailed)?,
+        )
+        .await?;
+        Ok(())
     }
 
-    fn checkout_tree(
+    pub async fn commit_record(
         &self,
-        tree_path: impl AsRef<Path>,
-        tree: Tree,
-    ) -> Result<String, WsvcFsError> {
-        let mut subtree_name_set = HashSet::with_capacity(tree.trees.len());
-        for sub_tree_id in tree.trees {
-            subtree_name_set.insert(self.checkout_subtree(&tree_path, sub_tree_id)?);
-        }
-
-        let mut blob_name_set: HashMap<_, _> = tree
-            .blobs
-            .into_iter()
-            .map(|x| (x.name.clone(), x))
-            .collect();
-
-        let entries = std::fs::read_dir(&tree_path)?;
-
-        for entry in entries {
-            let entry = entry?;
-
-            let entry_name = entry
-                .file_name()
-                .to_str()
-                .ok_or(WsvcFsError::InvalidOsString)?
-                .to_string();
-
-            let entry_type = entry.file_type()?;
-
-            if entry_type.is_dir() {
-                if entry_name != ".wsvc" && !subtree_name_set.contains(&entry_name) {
-                    std::fs::remove_dir_all(entry.path())?;
-                }
-            }
-
-            if entry_type.is_file() {
-                match blob_name_set.remove(&entry_name) {
-                    Some(x) => {
-                        if !x.verify(entry.path())? {
-                            self.checkout_blob_file(&x, entry.path())?;
-                        }
-                    }
-                    None => {
-                        std::fs::remove_file(entry.path())?;
-                    }
-                }
-            }
-        }
-
-        for b in blob_name_set {
-            self.checkout_blob_file(&b.1, tree_path.as_ref().join(b.0))?;
-        }
-
-        Ok(tree.name)
-    }
-
-    fn get_explicit_root(
-        &self,
-        explicit_root: Option<impl AsRef<Path>>,
-    ) -> Result<PathBuf, WsvcFsError> {
-        if explicit_root.is_none() && self.bare {
-            return Err(WsvcFsError::UnknownPath(
-                "explicit root dir should be specified in bare repo".to_string(),
-            ));
-        }
-        Ok(explicit_root
-            .map(|p| p.as_ref().to_path_buf())
-            .unwrap_or_else(|| self.path.clone()))
-    }
-
-    pub fn create_record(
-        &self,
-        explicit_root: Option<impl AsRef<Path>>,
-        message: String,
-        author: String,
-    ) -> Result<Record, WsvcFsError> {
-        let explicit_root = self.get_explicit_root(explicit_root)?;
-
-        let root = self.write_tree_file(explicit_root)?.hash;
-
-        let date = chrono::Utc::now();
-
-        let hash = blake3::hash(format!("{}:{}:{:?}:{:?}", message, author, date, root).as_bytes());
-
+        workspace: &Path,
+        author: impl AsRef<str>,
+        message: impl AsRef<str>,
+    ) -> Result<(), WsvcFsError> {
+        let tree = self.write_tree_recursively(workspace).await?;
+        let record = Record {
+            hash: ObjectId(Hash::from([0; 32])),
+            message: String::from(message.as_ref()),
+            author: String::from(author.as_ref()),
+            date: chrono::Utc::now(),
+            root: tree.hash,
+        };
+        let hash = blake3::hash(
+            serde_json::to_vec(&record)
+                .map_err(|_| WsvcFsError::SerializeFailed)?
+                .as_slice(),
+        );
         let record = Record {
             hash: ObjectId(hash),
-            author,
-            message,
-            date,
-            root,
+            ..record
         };
-
-        let record_json = serde_json::to_vec(&record).map_err(|_| WsvcFsError::SerializeFailed)?;
-
-        std::fs::write(
-            self.root_dir().join("records").join(hash.to_string()),
-            &record_json,
-        )?;
-
-        std::fs::write(self.root_dir().join("HEAD"), &record_json)?;
-
-        Ok(record)
+        // write record to HEAD
+        self.store_record(&record).await?;
+        write(self.path.join("HEAD"), hash.to_hex().to_string()).await?;
+        Ok(())
     }
 
-    pub fn checkout_record(
-        &self,
-        explicit_root: Option<impl AsRef<Path>>,
-        record_id: ObjectId,
-    ) -> Result<Record, WsvcFsError> {
-        let explicit_root = self.get_explicit_root(explicit_root)?;
-
+    pub async fn read_record(&self, record_hash: &ObjectId) -> Result<Record, WsvcFsError> {
         let record_path = self
-            .root_dir()
-            .join("records")
-            .join(record_id.0.to_string());
+            .records_dir()
+            .await?
+            .join(record_hash.0.to_hex().as_str());
+        let result = serde_json::from_slice::<Record>(&tokio::fs::read(record_path).await?)
+            .map_err(|_| WsvcFsError::DeserializeFailed)?;
+        Ok(result)
+    }
 
-        let record_file = std::fs::File::open(&record_path)?;
+    pub async fn checkout_record(
+        &self,
+        record_hash: &ObjectId,
+        workspace: &Path,
+    ) -> Result<(), WsvcFsError> {
+        let record = self.read_record(record_hash).await?;
+        self.checkout_tree(&self.read_tree(&record.root).await?, workspace)
+            .await?;
+        // write record to HEAD
+        write(self.path.join("HEAD"), record_hash.0.to_hex().to_string()).await?;
+        Ok(())
+    }
 
-        let record: Record =
-            serde_json::from_reader(record_file).map_err(|_| WsvcFsError::DeserializeFailed)?;
+    pub async fn get_records(&self) -> Result<Vec<Record>, WsvcFsError> {
+        let mut result = Vec::new();
+        let mut entries = read_dir(self.records_dir().await?).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_type = entry.file_type().await?;
+            if entry_type.is_file() {
+                result.push(
+                    self.read_record(&ObjectId(Hash::from_hex(
+                        entry
+                            .file_name()
+                            .to_str()
+                            .ok_or(WsvcFsError::InvalidOsString)?,
+                    )?))
+                    .await?,
+                );
+            }
+        }
+        Ok(result)
+    }
 
-        self.checkout_root_tree(Some(explicit_root), &record.root)?;
-
-        std::fs::copy(record_path, self.root_dir().join("HEAD"))?;
-
-        Ok(record)
+    pub async fn get_latest_record(&self) -> Result<Option<Record>, WsvcFsError> {
+        let mut result: Option<Record> = None;
+        let mut entries = read_dir(self.records_dir().await?).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_type = entry.file_type().await?;
+            if entry_type.is_file() {
+                let record = self
+                    .read_record(&ObjectId(Hash::from_hex(
+                        entry
+                            .file_name()
+                            .to_str()
+                            .ok_or(WsvcFsError::InvalidOsString)?,
+                    )?))
+                    .await?;
+                if result.is_none() || result.as_ref().unwrap().date < record.date {
+                    result = Some(record);
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
 impl Blob {
-    fn verify(&self, rel_path: impl AsRef<Path>) -> Result<bool, WsvcFsError> {
-        let mut file = std::fs::File::open(rel_path)?;
+    pub async fn checksum(&self, rel_path: impl AsRef<Path>) -> Result<bool, WsvcFsError> {
+        let mut file = File::open(rel_path).await?;
         let mut buffer: [u8; 1024] = [0; 1024];
         let mut hasher = blake3::Hasher::new();
         loop {
-            let n = file.read(&mut buffer)?;
+            let n = file.read(&mut buffer).await?;
             if n == 0 {
                 break;
             }

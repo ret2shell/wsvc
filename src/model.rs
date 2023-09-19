@@ -27,6 +27,30 @@ impl<'d> Deserialize<'d> for ObjectId {
     }
 }
 
+impl From<blake3::Hash> for ObjectId {
+    fn from(hash: blake3::Hash) -> Self {
+        ObjectId(hash)
+    }
+}
+
+impl TryFrom<String> for ObjectId {
+    type Error = blake3::HexError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        let hash = blake3::Hash::from_hex(&s)?;
+        Ok(ObjectId(hash))
+    }
+}
+
+impl TryFrom<&str> for ObjectId {
+    type Error = blake3::HexError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let hash = blake3::Hash::from_hex(s)?;
+        Ok(ObjectId(hash))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// `Blob` stand for an object.
 pub struct Blob {
@@ -57,7 +81,5 @@ pub struct Record {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// `Repository` stand for a repo.
 pub struct Repository {
-    #[serde(skip_serializing, skip_deserializing)]
     pub path: PathBuf,
-    pub bare: bool,
 }

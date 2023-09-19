@@ -5,12 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "wsvc"
+required-features = ["cli"]
+
 [dependencies]
 
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
-bytes = "1.4"
 futures = "0.3"
 async-trait = "0.1"
 
@@ -21,8 +24,33 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
-once_cell = "1.18"
 miniz_oxide = "0.7"
 nanoid = "0.4"
 
 blake3 = "1.4"
+async-recursion = "1.0"
+
+# cli dependencies
+once_cell = { version = "1.18", optional = true }
+clap = { version = "4.4" ,features = ["derive"], optional = true }
+
+# server dependencies
+axum = { version = "0.6", features = [
+    "headers",
+    "ws",
+    "http2",
+    "multipart",
+    "macros",
+], optional = true}
+hyper = { version = "0.14", features = ["full"], optional = true}
+tower = {version = "0.4", optional = true}
+tower-http = { version = "0.4", features = ["trace"], optional = true}
+
+# both cli & server
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"], optional = true }
+
+[features]
+default = ["all"]
+cli = ["dep:once_cell", "dep:clap", "dep:tokio-tungstenite"]
+server = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:tokio-tungstenite"]
+all = ["cli", "server"]

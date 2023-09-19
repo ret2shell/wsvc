@@ -1,6 +1,7 @@
+#[cfg(feature = "cli")]
 mod cli;
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
+    cli::run().await;
 }
