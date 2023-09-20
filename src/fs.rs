@@ -518,6 +518,20 @@ impl Repository {
         Ok(result)
     }
 
+    pub async fn get_trees_of_record(&self, record_hash: &ObjectId) -> Result<Vec<Tree>, WsvcFsError> {
+        let record = self.read_record(record_hash).await?;
+        let mut result = Vec::new();
+        let mut queue = vec![record.root];
+        while let Some(tree_hash) = queue.pop() {
+            let tree = self.read_tree(&tree_hash).await?;
+            result.push(tree.clone());
+            for tree_hash in tree.trees {
+                queue.push(tree_hash);
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn get_latest_record(&self) -> Result<Option<Record>, WsvcFsError> {
         let mut records = self.get_records().await?;
         if records.is_empty() {

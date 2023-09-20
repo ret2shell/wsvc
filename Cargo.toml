@@ -12,8 +12,9 @@ required-features = ["cli"]
 [dependencies]
 
 tokio = { version = "1.32", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = "0.1"
+bytes = "1.4"
 futures = "0.3"
 async-trait = "0.1"
 
@@ -48,11 +49,13 @@ axum = { version = "0.6", features = [
 hyper = { version = "0.14", features = ["full"], optional = true }
 tower = { version = "0.4", optional = true }
 tower-http = { version = "0.4", features = ["trace"], optional = true }
+tracing = { version = "0.1", optional = true }
 
 # both cli & server
 tokio-tungstenite = { version = "0.20", features = [
     "rustls-tls-native-roots",
 ], optional = true }
+
 
 [features]
 default = ["all"]
@@ -70,5 +73,6 @@ server = [
     "dep:tower",
     "dep:tower-http",
     "dep:tokio-tungstenite",
+    "dep:tracing",
 ]
 all = ["cli", "server"]
