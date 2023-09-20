@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use blake3::{Hash, HexError};
+use colored::Colorize;
 use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
 use tokio::{
-    fs::{create_dir_all, read_dir, remove_dir_all, remove_file, rename, write, File},
+    fs::{create_dir_all, read, read_dir, remove_dir_all, remove_file, rename, write, File},
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
@@ -276,9 +277,15 @@ impl Repository {
             name: rel_path
                 .as_ref()
                 .file_name()
-                .ok_or(WsvcFsError::InvalidFilename(format!("{:?}", rel_path.as_ref())))?
+                .ok_or(WsvcFsError::InvalidFilename(format!(
+                    "{:?}",
+                    rel_path.as_ref()
+                )))?
                 .to_str()
-                .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", rel_path.as_ref())))?
+                .ok_or(WsvcFsError::InvalidOsString(format!(
+                    "{:?}",
+                    rel_path.as_ref()
+                )))?
                 .to_string(),
             hash: store_blob_file_impl(
                 workspace.as_ref().join(rel_path),
@@ -396,7 +403,7 @@ impl Repository {
             let entry_path = workspace.join(entry);
             if entry_path.is_dir() {
                 if entry_path.file_name().unwrap().eq(".wsvc") {
-                    continue
+                    continue;
                 }
                 remove_dir_all(entry_path).await?;
             } else {
@@ -437,6 +444,8 @@ impl Repository {
         // write record to HEAD
         self.store_record(&record).await?;
         write(self.path.join("HEAD"), hash.to_hex().to_string()).await?;
+        let hash_str = hash.to_hex().to_ascii_lowercase();
+        println!("Committed as {} ({})", &hash_str[0..6].bold(), hash_str);
         Ok(())
     }
 
@@ -459,6 +468,11 @@ impl Repository {
             .await?;
         // write record to HEAD
         write(self.path.join("HEAD"), record_hash.0.to_hex().to_string()).await?;
+        println!(
+            "Checked out to {} ({})",
+            &record_hash.0.to_hex()[0..6].bold(),
+            record_hash.0.to_hex()
+        );
         remove_dir_all(self.temp_dir().await?).await?;
         Ok(())
     }
@@ -484,25 +498,30 @@ impl Repository {
     }
 
     pub async fn get_latest_record(&self) -> Result<Option<Record>, WsvcFsError> {
-        let mut result: Option<Record> = None;
-        let mut entries = read_dir(self.records_dir().await?).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let entry_type = entry.file_type().await?;
-            if entry_type.is_file() {
-                let record = self
-                    .read_record(&ObjectId(Hash::from_hex(
-                        entry
-                            .file_name()
-                            .to_str()
-                            .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", entry)))?,
-                    )?))
-                    .await?;
-                if result.is_none() || result.as_ref().unwrap().date < record.date {
-                    result = Some(record);
-                }
-            }
+        let mut records = self.get_records().await?;
+        if records.len() == 0 {
+            return Ok(None);
         }
-        Ok(result)
+        records.sort_by(|a, b| b.date.cmp(&a.date));
+        Ok(Some(records[0].clone()))
+    }
+
+    pub async fn get_head_record(&self) -> Result<Option<Record>, WsvcFsError> {
+        let head_hash = read(self.path.join("HEAD")).await?;
+        if String::from_utf8(head_hash.clone())
+            .map_err(|err| WsvcFsError::InvalidOsString(format!("{:?}", err)))?
+            == "".to_owned()
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.read_record(
+                &String::from_utf8(head_hash)
+                    .map_err(|err| WsvcFsError::InvalidOsString(format!("{:?}", err)))?
+                    .try_into()?,
+            )
+            .await?,
+        ))
     }
 }
 

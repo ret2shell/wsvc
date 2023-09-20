@@ -146,10 +146,16 @@ async fn checkout(
         if records.len() > 1 {
             println!("{}", "More than one commit found:".bright_red());
             for record in records.iter() {
+                let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
                 println!(
-                    "{}\nAt: {}\nMessage: {}\n",
-                    format!("Record {:?} by {}", record.hash, record.author).bold(),
-                    record.date,
+                    "{} At: {}\nMessage: {}\n",
+                    format!(
+                        "Record {} ({})\nAuthor: {}",
+                        &hash_str[0..6].bold(),
+                        hash_str.dimmed(),
+                        record.author.bright_blue()
+                    ),
+                    record.date.naive_local().to_string().yellow(),
                     record.message
                 );
             }
@@ -207,11 +213,28 @@ async fn logs(
     let limit = limit.unwrap_or(10);
     let mut records = repo.get_records().await?;
     records.sort_by(|a, b| b.date.cmp(&a.date));
+    let head_record = repo.get_head_record().await?;
     for record in records.iter().skip(skip).take(limit) {
+        let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
+        let cursor = if let Some(head_record) = &head_record {
+            if head_record.hash == record.hash {
+                "<== [HEAD]".bright_green().bold()
+            } else {
+                "".clear()
+            }
+        } else {
+            "".clear()
+        };
         println!(
-            "{}\nAt: {}\nMessage: {}\n",
-            format!("Record {:?} by {}", record.hash, record.author).bold(),
-            record.date,
+            "{} At: {}\nMessage: {}\n",
+            format!(
+                "Record {} ({}) {}\nAuthor: {}",
+                &hash_str[0..6].bold(),
+                hash_str.dimmed(),
+                cursor,
+                record.author.bright_blue()
+            ),
+            record.date.naive_local().to_string().yellow(),
             record.message
         );
     }
