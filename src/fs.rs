@@ -319,7 +319,7 @@ impl Repository {
             .objects_dir()
             .await?
             .join(blob_hash.0.to_hex().as_str());
-        let mut buffer: [u8; 1024] = [0; 1024];
+        let mut buffer: [u8; 32768] = [0; 32768];
         let mut header_buffer: [u8; 4] = [0; 4];
         let mut file = File::open(&blob_path).await?;
         let mut result = Vec::new();
