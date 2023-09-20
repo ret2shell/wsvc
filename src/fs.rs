@@ -5,7 +5,7 @@ use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
 use tokio::{
-    fs::{create_dir_all, read_dir, remove_file, rename, write, File, remove_dir_all},
+    fs::{create_dir_all, read_dir, remove_dir_all, remove_file, rename, write, File},
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
@@ -15,28 +15,22 @@ use super::model::{Blob, ObjectId, Repository, Tree};
 
 #[derive(Error, Debug)]
 pub enum WsvcFsError {
-    #[error("os file system error")]
+    #[error("os file system error: {0}")]
     Os(#[from] std::io::Error),
-    #[error("invalid path")]
-    InvalidPath,
-    #[error("decompress error")]
+    #[error("decompress error: {0}")]
     DecompressFailed(String),
-    #[error("unknown path")]
+    #[error("unknown path: {0}")]
     UnknownPath(String),
-    #[error("invalid hex string")]
+    #[error("invalid hex string: {0}")]
     InvalidHexString(#[from] HexError),
-    #[error("unknown fs error")]
-    Unknown,
-    #[error("serialize failed")]
-    SerializeFailed,
-    #[error("deserialize failed")]
-    DeserializeFailed,
-    #[error("invalid filename")]
-    InvalidFilename,
-    #[error("invalid OsString")]
-    InvalidOsString,
-    #[error("dir already exists")]
-    DirAlreadyExists,
+    #[error("serialize failed: {0}")]
+    SerializationFailed(#[from] serde_json::Error),
+    #[error("invalid filename: {0}")]
+    InvalidFilename(String),
+    #[error("invalid OsString: {0}")]
+    InvalidOsString(String),
+    #[error("dir already exists: {0}")]
+    DirAlreadyExists(String),
 }
 
 #[derive(Clone, Debug)]
@@ -133,15 +127,11 @@ async fn store_tree_file_impl(tree: TreeImpl, trees_dir: &Path) -> Result<Tree, 
             .trees
             .push(store_tree_file_impl(tree, trees_dir.clone()).await?.hash);
     }
-    let hash = blake3::hash(
-        serde_json::to_vec(&result)
-            .map_err(|_| WsvcFsError::SerializeFailed)?
-            .as_slice(),
-    );
+    let hash = blake3::hash(serde_json::to_vec(&result)?.as_slice());
     result.hash = ObjectId(hash);
     write(
         trees_dir.join(hash.to_string()),
-        serde_json::to_vec(&result).map_err(|_| WsvcFsError::SerializeFailed)?,
+        serde_json::to_vec(&result)?,
     )
     .await?;
 
@@ -155,7 +145,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
             .file_name()
             .unwrap_or(std::ffi::OsStr::new("."))
             .to_str()
-            .ok_or(WsvcFsError::InvalidOsString)?
+            .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", work_dir)))?
             .to_string(),
         trees: vec![],
         blobs: vec![],
@@ -177,7 +167,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
                     name: entry
                         .file_name()
                         .to_str()
-                        .ok_or(WsvcFsError::InvalidOsString)?
+                        .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", entry)))?
                         .to_string(),
                     hash: store_blob_file_impl(
                         &entry.path(),
@@ -205,7 +195,7 @@ impl Repository {
             create_dir_all(path.join("records")).await?;
             write(path.join("HEAD"), "").await?;
         } else {
-            return Err(WsvcFsError::DirAlreadyExists);
+            return Err(WsvcFsError::DirAlreadyExists(format!("{:?}", path)));
         }
         Ok(Self { path })
     }
@@ -218,7 +208,7 @@ impl Repository {
         if !path.exists() {
             return Err(WsvcFsError::UnknownPath(
                 path.to_str()
-                    .ok_or(WsvcFsError::InvalidOsString)?
+                    .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", path)))?
                     .to_string(),
             ));
         }
@@ -231,7 +221,7 @@ impl Repository {
         } else {
             Err(WsvcFsError::UnknownPath(
                 path.to_str()
-                    .ok_or(WsvcFsError::InvalidOsString)?
+                    .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", path)))?
                     .to_string(),
             ))
         }
@@ -286,9 +276,9 @@ impl Repository {
             name: rel_path
                 .as_ref()
                 .file_name()
-                .ok_or(WsvcFsError::InvalidFilename)?
+                .ok_or(WsvcFsError::InvalidFilename(format!("{:?}", rel_path.as_ref())))?
                 .to_str()
-                .ok_or(WsvcFsError::InvalidOsString)?
+                .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", rel_path.as_ref())))?
                 .to_string(),
             hash: store_blob_file_impl(
                 workspace.as_ref().join(rel_path),
@@ -357,8 +347,7 @@ impl Repository {
 
     pub async fn read_tree(&self, tree_hash: &ObjectId) -> Result<Tree, WsvcFsError> {
         let tree_path = self.trees_dir().await?.join(tree_hash.0.to_hex().as_str());
-        let result = serde_json::from_slice::<Tree>(&tokio::fs::read(tree_path).await?)
-            .map_err(|_| WsvcFsError::DeserializeFailed)?;
+        let result = serde_json::from_slice::<Tree>(&tokio::fs::read(tree_path).await?)?;
         Ok(result)
     }
 
@@ -406,6 +395,9 @@ impl Repository {
         for entry in should_be_del {
             let entry_path = workspace.join(entry);
             if entry_path.is_dir() {
+                if entry_path.file_name().unwrap().eq(".wsvc") {
+                    continue
+                }
                 remove_dir_all(entry_path).await?;
             } else {
                 remove_file(entry_path).await?;
@@ -419,11 +411,7 @@ impl Repository {
             .records_dir()
             .await?
             .join(record.hash.0.to_hex().as_str());
-        write(
-            record_path,
-            serde_json::to_vec(record).map_err(|_| WsvcFsError::SerializeFailed)?,
-        )
-        .await?;
+        write(record_path, serde_json::to_vec(record)?).await?;
         Ok(())
     }
 
@@ -441,11 +429,7 @@ impl Repository {
             date: chrono::Utc::now(),
             root: tree.hash,
         };
-        let hash = blake3::hash(
-            serde_json::to_vec(&record)
-                .map_err(|_| WsvcFsError::SerializeFailed)?
-                .as_slice(),
-        );
+        let hash = blake3::hash(serde_json::to_vec(&record)?.as_slice());
         let record = Record {
             hash: ObjectId(hash),
             ..record
@@ -461,8 +445,7 @@ impl Repository {
             .records_dir()
             .await?
             .join(record_hash.0.to_hex().as_str());
-        let result = serde_json::from_slice::<Record>(&tokio::fs::read(record_path).await?)
-            .map_err(|_| WsvcFsError::DeserializeFailed)?;
+        let result = serde_json::from_slice::<Record>(&tokio::fs::read(record_path).await?)?;
         Ok(result)
     }
 
@@ -491,7 +474,7 @@ impl Repository {
                         entry
                             .file_name()
                             .to_str()
-                            .ok_or(WsvcFsError::InvalidOsString)?,
+                            .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", entry)))?,
                     )?))
                     .await?,
                 );
@@ -511,7 +494,7 @@ impl Repository {
                         entry
                             .file_name()
                             .to_str()
-                            .ok_or(WsvcFsError::InvalidOsString)?,
+                            .ok_or(WsvcFsError::InvalidOsString(format!("{:?}", entry)))?,
                     )?))
                     .await?;
                 if result.is_none() || result.as_ref().unwrap().date < record.date {

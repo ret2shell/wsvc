@@ -1,8 +1,9 @@
-use std::{path::PathBuf, process::exit};
+use std::path::PathBuf;
 
 use clap::{command, Parser};
+use colored::Colorize;
 use tokio::fs::read;
-use wsvc::model::Repository;
+use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
 /// wsvc is a simple version control system.
 #[derive(Parser)]
@@ -63,7 +64,7 @@ enum WsvcCli {
     },
 }
 
-pub async fn run() {
+pub async fn run() -> Result<(), WsvcError> {
     let cli = WsvcCli::parse();
     match cli {
         WsvcCli::Commit {
@@ -71,25 +72,15 @@ pub async fn run() {
             author,
             workspace,
             root,
-        } => {
-            commit(message, author, workspace, root).await;
-        }
+        } => commit(message, author, workspace, root).await,
         WsvcCli::Checkout {
             hash,
             workspace,
             root,
-        } => {
-            checkout(hash, workspace, root).await;
-        }
-        WsvcCli::Init { bare } => {
-            init(bare).await;
-        }
-        WsvcCli::New { name, bare } => {
-            new(name, bare).await;
-        }
-        WsvcCli::Logs { root, skip, limit } => {
-            logs(root, skip, limit).await;
-        }
+        } => checkout(hash, workspace, root).await,
+        WsvcCli::Init { bare } => init(bare).await,
+        WsvcCli::New { name, bare } => new(name, bare).await,
+        WsvcCli::Logs { root, skip, limit } => logs(root, skip, limit).await,
     }
 }
 
@@ -98,7 +89,7 @@ async fn commit(
     author: Option<String>,
     workspace: Option<String>,
     root: Option<String>,
-) {
+) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
         .unwrap()
         .to_str()
@@ -106,23 +97,26 @@ async fn commit(
         .to_string();
     let workspace = PathBuf::from(workspace.unwrap_or(pwd.clone()));
     let root = root.unwrap_or(pwd);
-    let repo = Repository::try_open(root)
-        .await
-        .expect("failed to open repo");
+    let repo = Repository::try_open(root).await?;
     if repo.path == workspace {
-        println!("workspace and repo path can not be the same");
-        exit(-1);
+        return Err(WsvcError::BadUsage(
+            "workspace and repo path can not be the same".to_owned(),
+        ));
     }
     repo.commit_record(
         &workspace,
         &author.unwrap_or(String::from("UNKNOWN")),
         &message,
     )
-    .await
-    .expect("failed to commit");
+    .await?;
+    Ok(())
 }
 
-async fn checkout(hash: Option<String>, workspace: Option<String>, root: Option<String>) {
+async fn checkout(
+    hash: Option<String>,
+    workspace: Option<String>,
+    root: Option<String>,
+) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
         .unwrap()
         .to_str()
@@ -130,91 +124,96 @@ async fn checkout(hash: Option<String>, workspace: Option<String>, root: Option<
         .to_string();
     let workspace = PathBuf::from(workspace.unwrap_or(pwd.clone()));
     let root = root.unwrap_or(pwd);
-    let repo = Repository::try_open(root)
-        .await
-        .expect("failed to open repo");
+    let repo = Repository::try_open(root).await?;
     if repo.path == workspace {
-        println!("workspace and repo path can not be the same");
-        exit(-1);
+        return Err(WsvcError::BadUsage(
+            "workspace and repo path can not be the same".to_owned(),
+        ));
     }
     if let Some(hash) = hash {
         let hash = hash.to_ascii_lowercase();
-        let records = repo.get_records().await.expect("failed to get records");
+        let records = repo.get_records().await?;
         let records = records
             .iter()
             .filter(|h| h.hash.0.to_hex().to_ascii_lowercase().starts_with(&hash))
             .collect::<Vec<_>>();
         if records.len() == 0 {
-            println!("no commit found");
-            exit(-1);
+            return Err(WsvcError::BadUsage(format!(
+                "no commit found for hash {}",
+                hash
+            )));
         }
         if records.len() > 1 {
-            println!("more than one commit found:");
+            println!("{}", "More than one commit found:".bright_red());
             for record in records.iter() {
                 println!(
-                    "Record {:?} by {}\nAt: {}\nMessage: {}\n",
-                    record.hash, record.author, record.date, record.message
+                    "{}\nAt: {}\nMessage: {}\n",
+                    format!("Record {:?} by {}", record.hash, record.author).bold(),
+                    record.date,
+                    record.message
                 );
             }
-            exit(-1);
+            return Err(WsvcError::BadUsage(format!(
+                "more than one commit found for hash {}",
+                hash
+            )));
         }
-        repo.checkout_record(&&records[0].hash, &workspace)
-            .await
-            .expect("failed to checkout record");
+        repo.checkout_record(&&records[0].hash, &workspace).await?;
     } else {
         let head_hash = read(repo.path.join("HEAD"))
             .await
-            .expect("failed to read head");
-        if String::from_utf8(head_hash.clone()).expect("failed to parse HEAD") == "".to_owned() {
-            println!("no commit found");
-            exit(-1);
+            .map_err(|err| WsvcFsError::Os(err))?;
+        if String::from_utf8(head_hash.clone())? == "".to_owned() {
+            return Err(WsvcError::BadUsage("no commit found for HEAD".to_owned()));
         }
         repo.checkout_record(
-            &String::from_utf8(head_hash)
-                .expect("failed to parse HEAD")
+            &String::from_utf8(head_hash)?
                 .try_into()
-                .expect("failed to parse hash"),
+                .map_err(|err| WsvcFsError::InvalidHexString(err))?,
             &workspace,
         )
-        .await
-        .expect("failed to checkout record");
+        .await?;
     }
+    Ok(())
 }
 
-async fn init(bare: Option<bool>) {
-    let pwd = std::env::current_dir().expect("failed to get current dir");
+async fn init(bare: Option<bool>) -> Result<(), WsvcError> {
+    let pwd = std::env::current_dir().map_err(|err| WsvcFsError::Os(err))?;
     let bare = bare.unwrap_or(false);
-    Repository::new(&pwd, bare)
-        .await
-        .expect("failed to init repo");
+    Repository::new(&pwd, bare).await?;
+    Ok(())
 }
 
-async fn new(name: String, bare: Option<bool>) {
-    let pwd = std::env::current_dir().expect("failed to get current dir");
+async fn new(name: String, bare: Option<bool>) -> Result<(), WsvcError> {
+    let pwd = std::env::current_dir().map_err(|err| WsvcFsError::Os(err))?;
     let bare = bare.unwrap_or(false);
-    Repository::new(&pwd.join(&name), bare)
-        .await
-        .expect("failed to init repo");
+    Repository::new(&pwd.join(&name), bare).await?;
+    Ok(())
 }
 
-async fn logs(root: Option<String>, skip: Option<usize>, limit: Option<usize>) {
+async fn logs(
+    root: Option<String>,
+    skip: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
     let root = root.unwrap_or(pwd);
-    let repo = Repository::try_open(root)
-        .await
-        .expect("failed to open repo");
+    let repo = Repository::try_open(root).await?;
     let skip = skip.unwrap_or(0);
     let limit = limit.unwrap_or(10);
-    let mut records = repo.get_records().await.expect("failed to get records");
+    let mut records = repo.get_records().await?;
     records.sort_by(|a, b| b.date.cmp(&a.date));
     for record in records.iter().skip(skip).take(limit) {
         println!(
-            "Record {:?} by {}\nAt: {}\nMessage: {}\n",
-            record.hash, record.author, record.date, record.message
+            "{}\nAt: {}\nMessage: {}\n",
+            format!("Record {:?} by {}", record.hash, record.author).bold(),
+            record.date,
+            record.message
         );
     }
+    Ok(())
 }
