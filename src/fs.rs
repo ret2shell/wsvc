@@ -34,6 +34,8 @@ pub enum WsvcFsError {
     DirAlreadyExists(String),
     #[error("no changes with record: {0}")]
     NoChanges(String),
+    #[error("workspace is locked")]
+    WorkspaceLocked,
 }
 
 #[derive(Clone, Debug)]
@@ -217,7 +219,7 @@ impl Repository {
         } else {
             return Err(WsvcFsError::DirAlreadyExists(format!("{:?}", path)));
         }
-        Ok(Self { path })
+        Ok(Self { path, lock: nanoid!() })
     }
 
     /// open a repository at path.
@@ -238,7 +240,7 @@ impl Repository {
             && path.join("records").exists()
             && path.join("HEAD").exists()
         {
-            Ok(Self { path })
+            Ok(Self { path, lock: nanoid!() })
         } else {
             Err(WsvcFsError::UnknownPath(
                 path.to_str()
@@ -246,6 +248,35 @@ impl Repository {
                     .to_string(),
             ))
         }
+    }
+
+    /// lock repository for write.
+    /// 
+    /// notice that the Repository struct is `Clone`able, so there is still risky when you
+    /// cloned multiple Repository struct in different threads. it is recommended to construct
+    /// `Repository` everytime when you need it, the `lock` function is just for convenience.
+    pub async fn lock(&self) -> Result<(), WsvcFsError> {
+        write(self.path.join("LOCK"), self.lock.clone()).await?;
+        Ok(())
+    }
+
+    /// check if the repository is locked.
+    pub async fn check_lock(&self) -> Result<(), WsvcFsError> {
+        let lock = read(self.path.join("LOCK")).await?;
+        if String::from_utf8(lock)
+            .map_err(|err| WsvcFsError::InvalidOsString(format!("{:?}", err)))?
+            == self.lock
+        {
+            Ok(())
+        } else {
+            Err(WsvcFsError::WorkspaceLocked)
+        }
+    }
+
+    /// unlock repository.
+    pub async fn unlock(&self) -> Result<(), WsvcFsError> {
+        remove_file(self.path.join("LOCK")).await?;
+        Ok(())
     }
 
     /// try open a repository at path.

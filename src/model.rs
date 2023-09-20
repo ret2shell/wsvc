@@ -89,4 +89,5 @@ pub struct Record {
 /// `Repository` stand for a repo.
 pub struct Repository {
     pub path: PathBuf,
+    pub lock: String,
 }

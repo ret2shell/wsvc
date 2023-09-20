@@ -226,6 +226,8 @@ async fn recv_file(
 pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), WsvcServerError> {
     // packet header: 0x33 0x07 [size]
     // the first round for server, pack all record and send it to client
+    repo.check_lock().await.map_err(WsvcError::FsError)?;
+    repo.lock().await.map_err(WsvcError::FsError)?;
     let records = repo.get_records().await.map_err(WsvcError::FsError)?;
     let packet_body = serde_json::to_string(&records)?;
     tracing::debug!("send records: {:?}", records);
@@ -356,6 +358,6 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
-
+    repo.unlock().await.map_err(WsvcError::FsError)?;
     Ok(())
 }
