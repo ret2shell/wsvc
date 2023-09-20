@@ -4,6 +4,7 @@ use chrono::serde::ts_seconds::{deserialize as from_ts, serialize as to_ts};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// `ObjectId` stand for a hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub blake3::Hash);
 

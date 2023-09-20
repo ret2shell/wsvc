@@ -13,6 +13,7 @@ use crate::model::Record;
 
 use super::model::{Blob, ObjectId, Repository, Tree};
 
+/// Error type for wsvc fs.
 #[derive(Error, Debug)]
 pub enum WsvcFsError {
     #[error("os file system error: {0}")]
@@ -42,6 +43,7 @@ struct TreeImpl {
     blobs: Vec<Blob>,
 }
 
+/// Store a blob file to objects dir.
 async fn store_blob_file_impl(
     path: impl AsRef<Path>,
     objects_dir: impl AsRef<Path>,
@@ -78,6 +80,7 @@ async fn store_blob_file_impl(
     Ok(ObjectId(hash))
 }
 
+/// Checkout a blob file from objects dir to path
 async fn checkout_blob_file_impl(
     path: impl AsRef<Path>,
     objects_dir: impl AsRef<Path>,
@@ -116,6 +119,11 @@ async fn checkout_blob_file_impl(
     Ok(())
 }
 
+/// Store a tree file to trees dir.
+/// Return a tuple of `(tree, is_new)`.
+/// `is_new` means whether the tree is new created.
+/// 
+/// Noticed that this function is recursive.
 #[async_recursion::async_recursion(?Send)]
 async fn store_tree_file_impl(
     tree: TreeImpl,
@@ -147,6 +155,9 @@ async fn store_tree_file_impl(
     Ok((result, false))
 }
 
+/// Build a tree from a work dir.
+/// 
+/// all blobs will be stored to objects dir when building.
 #[async_recursion::async_recursion(?Send)]
 async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsError> {
     let mut result = TreeImpl {
@@ -192,6 +203,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
 }
 
 impl Repository {
+    /// init a new repository at path.
     pub async fn new(path: impl AsRef<Path>, is_bare: bool) -> Result<Self, WsvcFsError> {
         let mut path = path.as_ref().to_owned();
         if !is_bare {
@@ -208,6 +220,7 @@ impl Repository {
         Ok(Self { path })
     }
 
+    /// open a repository at path.
     pub async fn open(path: impl AsRef<Path>, is_bare: bool) -> Result<Self, WsvcFsError> {
         let mut path = path.as_ref().to_owned();
         if !is_bare {
@@ -235,6 +248,9 @@ impl Repository {
         }
     }
 
+    /// try open a repository at path.
+    /// 
+    /// the `bare` option will be guessed.
     pub async fn try_open(path: impl AsRef<Path>) -> Result<Self, WsvcFsError> {
         if let Ok(repo) = Repository::open(&path, false).await {
             Ok(repo)
@@ -243,6 +259,7 @@ impl Repository {
         }
     }
 
+    /// get the temp folder of the repository.
     pub async fn temp_dir(&self) -> Result<PathBuf, WsvcFsError> {
         let result = self.path.join("temp");
         if !result.exists() {
@@ -251,6 +268,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// get the objects folder of the repository.
     pub async fn objects_dir(&self) -> Result<PathBuf, WsvcFsError> {
         let result = self.path.join("objects");
         if !result.exists() {
@@ -259,6 +277,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// get the trees folder of the repository.
     pub async fn trees_dir(&self) -> Result<PathBuf, WsvcFsError> {
         let result = self.path.join("trees");
         if !result.exists() {
@@ -267,6 +286,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// get the records folder of the repository.
     pub async fn records_dir(&self) -> Result<PathBuf, WsvcFsError> {
         let result = self.path.join("records");
         if !result.exists() {
@@ -275,6 +295,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// store a blob file from workspace to objects dir.
     pub async fn store_blob(
         &self,
         workspace: impl AsRef<Path>,
@@ -303,6 +324,7 @@ impl Repository {
         })
     }
 
+    /// checkout a blob file from objects dir to workspace.
     pub async fn checkout_blob(
         &self,
         blob_hash: &ObjectId,
@@ -318,6 +340,7 @@ impl Repository {
         .await
     }
 
+    /// read blob data from objects database.
     pub async fn read_blob(&self, blob_hash: &ObjectId) -> Result<Vec<u8>, WsvcFsError> {
         let blob_path = self
             .objects_dir()
@@ -350,6 +373,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// write all trees of current workspace to trees dir.
     pub async fn write_tree_recursively(
         &self,
         workspace: impl AsRef<Path> + Clone,
@@ -359,12 +383,14 @@ impl Repository {
         Ok(result)
     }
 
+    /// read a tree object from trees dir
     pub async fn read_tree(&self, tree_hash: &ObjectId) -> Result<Tree, WsvcFsError> {
         let tree_path = self.trees_dir().await?.join(tree_hash.0.to_hex().as_str());
         let result = serde_json::from_slice::<Tree>(&tokio::fs::read(tree_path).await?)?;
         Ok(result)
     }
 
+    /// checkout a tree to workspace.
     #[async_recursion::async_recursion(?Send)]
     pub async fn checkout_tree(&self, tree: &Tree, workspace: &Path) -> Result<(), WsvcFsError> {
         // collect files to be deleted
@@ -420,6 +446,7 @@ impl Repository {
         Ok(())
     }
 
+    /// store a record to records dir.
     pub async fn store_record(&self, record: &Record) -> Result<(), WsvcFsError> {
         let record_path = self
             .records_dir()
@@ -429,6 +456,7 @@ impl Repository {
         Ok(())
     }
 
+    /// find a record for the specified tree.
     pub async fn find_record_for_tree(
         &self,
         tree_id: &Hash,
@@ -443,6 +471,7 @@ impl Repository {
         Ok(None)
     }
 
+    /// commit a record.
     pub async fn commit_record(
         &self,
         workspace: &Path,
@@ -475,6 +504,7 @@ impl Repository {
         Ok(record)
     }
 
+    /// read a record from records dir.
     pub async fn read_record(&self, record_hash: &ObjectId) -> Result<Record, WsvcFsError> {
         let record_path = self
             .records_dir()
@@ -484,6 +514,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// checkout a record to workspace.
     pub async fn checkout_record(
         &self,
         record_hash: &ObjectId,
@@ -498,6 +529,7 @@ impl Repository {
         Ok(record)
     }
 
+    /// get all records
     pub async fn get_records(&self) -> Result<Vec<Record>, WsvcFsError> {
         let mut result = Vec::new();
         let mut entries = read_dir(self.records_dir().await?).await?;
@@ -518,6 +550,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// get all trees of a record
     pub async fn get_trees_of_record(&self, record_hash: &ObjectId) -> Result<Vec<Tree>, WsvcFsError> {
         let record = self.read_record(record_hash).await?;
         let mut result = Vec::new();
@@ -532,6 +565,7 @@ impl Repository {
         Ok(result)
     }
 
+    /// get the latest record
     pub async fn get_latest_record(&self) -> Result<Option<Record>, WsvcFsError> {
         let mut records = self.get_records().await?;
         if records.is_empty() {
@@ -541,6 +575,7 @@ impl Repository {
         Ok(Some(records[0].clone()))
     }
 
+    /// get the head record
     pub async fn get_head_record(&self) -> Result<Option<Record>, WsvcFsError> {
         let head_hash = read(self.path.join("HEAD")).await?;
         if String::from_utf8(head_hash.clone())
@@ -561,6 +596,7 @@ impl Repository {
 }
 
 impl Blob {
+    /// get the checksum of a blob file.
     pub async fn checksum(&self, rel_path: impl AsRef<Path>) -> Result<bool, WsvcFsError> {
         let mut file = File::open(rel_path).await?;
         let mut buffer: [u8; 16384] = [0; 16384];

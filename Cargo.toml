@@ -2,7 +2,13 @@
 name = "wsvc"
 version = "0.1.0"
 edition = "2021"
-
+authors = ["Reverier-Xu <reverier.xu@woooo.tech>"]
+description = "WebSocket Simple Version Control tool."
+homepage = "https://github.com/ret2shell/wsvc"
+documentation = "https://docs.rs/wsvc"
+repository = "https://github.com/ret2shell/wsvc"
+readme = "README.md"
+license = "MPL-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
@@ -30,12 +36,12 @@ nanoid = "0.4"
 
 blake3 = "1.4"
 async-recursion = "1.0"
+toml = "0.8"
 
 # cli dependencies
 once_cell = { version = "1.18", optional = true }
 clap = { version = "4.4", features = ["derive"], optional = true }
 colored = { version = "2.0", optional = true }
-toml = { version = "0.8", optional = true }
 dirs = { version = "5.0", optional = true }
 
 # server dependencies
@@ -58,21 +64,13 @@ tokio-tungstenite = { version = "0.20", features = [
 
 
 [features]
-default = ["all"]
+default = ["server"]
 cli = [
     "dep:once_cell",
     "dep:clap",
     "dep:tokio-tungstenite",
     "dep:colored",
-    "dep:toml",
     "dep:dirs",
 ]
-server = [
-    "dep:axum",
-    "dep:hyper",
-    "dep:tower",
-    "dep:tower-http",
-    "dep:tokio-tungstenite",
-    "dep:tracing",
-]
+server = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:tracing"]
 all = ["cli", "server"]

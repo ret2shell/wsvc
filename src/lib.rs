@@ -7,6 +7,7 @@ pub mod fs;
 #[cfg(feature = "server")]
 pub mod server;
 
+/// Error type for wsvc
 #[derive(Error, Debug)]
 pub enum WsvcError {
     #[error("fs error: {0}")]

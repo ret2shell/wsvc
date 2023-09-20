@@ -14,6 +14,7 @@ use crate::{
     WsvcError,
 };
 
+/// `WsvcServerError` stand for server error.
 #[derive(Error, Debug)]
 pub enum WsvcServerError {
     #[error("fs error: {0}")]
@@ -216,13 +217,21 @@ async fn recv_file(
     Ok(())
 }
 
+/// `sync_with` syncs repository with client.
+/// 
+/// ## arguments
+/// 
+/// * `repo` - repository to sync with.
+/// * `ws` - websocket connection from axum.
 pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), WsvcServerError> {
     // packet header: 0x33 0x07 [size]
     // the first round for server, pack all record and send it to client
     let records = repo.get_records().await.map_err(WsvcError::FsError)?;
     let packet_body = serde_json::to_string(&records)?;
+    tracing::debug!("send records: {:?}", records);
     send_data(&mut ws, packet_body.into_bytes()).await?;
     let diff_records = recv_data(&mut ws).await?;
+    tracing::debug!("recv diff records: {:?}", diff_records);
     let diff_records: Vec<RecordWithState> = serde_json::from_slice(&diff_records)?;
     let client_wanted_records = diff_records
         .iter()
@@ -247,13 +256,16 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
         );
     }
     let packet_body = serde_json::to_string(&trees)?;
+    tracing::debug!("send trees: {:?}", trees);
     send_data(&mut ws, packet_body.into_bytes()).await?;
 
     // now client have the complete trees list.
     // in round three, server should send all blobs to client which are required.
     let new_trees = recv_data(&mut ws).await?;
+    tracing::debug!("recv new trees: {:?}", new_trees);
     let new_trees: Vec<Tree> = serde_json::from_slice(&new_trees)?;
     let diff_blobs = recv_data(&mut ws).await?;
+    tracing::debug!("recv diff blobs: {:?}", diff_blobs);
     let diff_blobs: Vec<BlobWithState> = serde_json::from_slice(&diff_blobs)?;
     let client_wanted_blobs = diff_blobs
         .iter()
@@ -276,6 +288,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
         let file = File::open(blob_path)
             .await
             .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+        tracing::debug!("sending blob file: {:?}", blob.hash);
         send_file(&mut ws, &blob.hash.0.to_hex().as_str(), file).await?;
     }
     let temp_dir = repo.temp_dir().await.map_err(WsvcError::FsError)?;
@@ -290,6 +303,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
     }
 
     for blob in &client_will_given_blobs {
+        tracing::debug!("checking blob file: {:?}", blob);
         if !blob
             .checksum(&dir.join(blob.hash.0.to_hex().as_str()))
             .await
@@ -302,6 +316,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
         }
     }
 
+    tracing::debug!("moving blob files to object database...");
     let objects_dir = repo.objects_dir().await.map_err(WsvcError::FsError)?;
     let mut entries = read_dir(&dir)
         .await
@@ -317,6 +332,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
     }
 
     // store trees
+    tracing::debug!("write trees to tree database...");
     let trees_dir = repo.trees_dir().await.map_err(WsvcError::FsError)?;
     for tree in &new_trees {
         write(
@@ -329,6 +345,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
     }
 
     // store records
+    tracing::debug!("write records to record database...");
     let records_dir = repo.records_dir().await.map_err(WsvcError::FsError)?;
     for record in &client_will_given_records {
         write(
@@ -339,19 +356,6 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
-    write(
-        repo.path.join("HEAD"),
-        repo.get_latest_record()
-            .await
-            .map_err(WsvcError::FsError)?
-            .unwrap()
-            .hash
-            .0
-            .to_hex()
-            .as_str(),
-    )
-    .await
-    .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
 
     Ok(())
 }
