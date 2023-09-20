@@ -95,6 +95,7 @@ async fn send_file(
     file_name: &str,
     mut file: File,
 ) -> Result<(), WsvcServerError> {
+    // file name packet header: 0x09 0x28 [size], 9.28 is Kamisato Ayaka's birthday
     let mut header_buf = [0x09u8, 0x28u8, 0u8, 0u8];
     let file_name_size = file_name.len();
     if file_name_size > 16384 {
