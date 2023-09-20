@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use clap::{command, Parser};
 use colored::Colorize;
-use tokio::fs::read;
 use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
 /// wsvc is a simple version control system.
@@ -139,12 +138,12 @@ async fn checkout(
             .collect::<Vec<_>>();
         if records.len() == 0 {
             return Err(WsvcError::BadUsage(format!(
-                "no commit found for hash {}",
+                "no record found for hash {}",
                 hash
             )));
         }
         if records.len() > 1 {
-            println!("{}", "More than one commit found:".bright_red());
+            println!("{}", "More than one record found:".bright_red());
             for record in records.iter() {
                 let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
                 println!(
@@ -160,25 +159,18 @@ async fn checkout(
                 );
             }
             return Err(WsvcError::BadUsage(format!(
-                "more than one commit found for hash {}",
+                "more than one record found for hash {}",
                 hash
             )));
         }
         repo.checkout_record(&&records[0].hash, &workspace).await?;
     } else {
-        let head_hash = read(repo.path.join("HEAD"))
-            .await
-            .map_err(|err| WsvcFsError::Os(err))?;
-        if String::from_utf8(head_hash.clone())? == "".to_owned() {
-            return Err(WsvcError::BadUsage("no commit found for HEAD".to_owned()));
-        }
-        repo.checkout_record(
-            &String::from_utf8(head_hash)?
-                .try_into()
-                .map_err(|err| WsvcFsError::InvalidHexString(err))?,
-            &workspace,
-        )
-        .await?;
+        let latest_hash = repo
+            .get_latest_record()
+            .await?
+            .ok_or(WsvcError::BadUsage("no record found".to_owned()))?
+            .hash;
+        repo.checkout_record(&latest_hash, &workspace).await?;
     }
     Ok(())
 }
@@ -214,16 +206,27 @@ async fn logs(
     let mut records = repo.get_records().await?;
     records.sort_by(|a, b| b.date.cmp(&a.date));
     let head_record = repo.get_head_record().await?;
+    let latest_record = repo.get_latest_record().await?;
+    let head_hash = head_record.map(|r| r.hash).unwrap_or_default();
+    let latest_hash = latest_record.map(|r| r.hash).unwrap_or_default();
     for record in records.iter().skip(skip).take(limit) {
         let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
-        let cursor = if let Some(head_record) = &head_record {
-            if head_record.hash == record.hash {
-                "<== [HEAD]".bright_green().bold()
-            } else {
-                "".clear()
-            }
+        let cursor = if head_hash == record.hash || latest_hash == record.hash {
+            format!(
+                "<== {}{}",
+                if head_hash == record.hash {
+                    "[HEAD]".bright_green().bold()
+                } else {
+                    "".clear()
+                },
+                if latest_hash == record.hash {
+                    "[LATEST]".bright_blue().bold()
+                } else {
+                    "".clear()
+                }
+            )
         } else {
-            "".clear()
+            "".to_owned()
         };
         println!(
             "{} At: {}\nMessage: {}\n",

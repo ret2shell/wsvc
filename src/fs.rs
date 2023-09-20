@@ -32,6 +32,8 @@ pub enum WsvcFsError {
     InvalidOsString(String),
     #[error("dir already exists: {0}")]
     DirAlreadyExists(String),
+    #[error("no changes were made after the latest record")]
+    NoChanges,
 }
 
 #[derive(Clone, Debug)]
@@ -429,6 +431,12 @@ impl Repository {
         message: impl AsRef<str>,
     ) -> Result<(), WsvcFsError> {
         let tree = self.write_tree_recursively(workspace).await?;
+        let latest_record = self.get_latest_record().await?;
+        if let Some(latest_record) = latest_record {
+            if latest_record.root == tree.hash {
+                return Err(WsvcFsError::NoChanges);
+            }
+        }
         let record = Record {
             hash: ObjectId(Hash::from([0; 32])),
             message: String::from(message.as_ref()),
@@ -445,7 +453,7 @@ impl Repository {
         self.store_record(&record).await?;
         write(self.path.join("HEAD"), hash.to_hex().to_string()).await?;
         let hash_str = hash.to_hex().to_ascii_lowercase();
-        println!("Committed as {} ({})", &hash_str[0..6].bold(), hash_str);
+        println!("Committed as Record {} ({})", &hash_str[0..6].bold(), hash_str);
         Ok(())
     }
 
@@ -469,7 +477,7 @@ impl Repository {
         // write record to HEAD
         write(self.path.join("HEAD"), record_hash.0.to_hex().to_string()).await?;
         println!(
-            "Checked out to {} ({})",
+            "Checked out HEAD to {} ({})",
             &record_hash.0.to_hex()[0..6].bold(),
             record_hash.0.to_hex()
         );

@@ -7,6 +7,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub blake3::Hash);
 
+impl Default for ObjectId {
+    fn default() -> Self {
+        ObjectId(blake3::Hash::from_bytes([0; 32]))
+    }
+}
+
 impl Serialize for ObjectId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
