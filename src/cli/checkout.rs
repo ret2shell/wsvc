@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use colored::Colorize;
 use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
+use super::config::get_config;
+
 pub async fn checkout(
     hash: Option<String>,
     workspace: Option<String>,
     root: Option<String>,
 ) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
-        .map_err(|err| WsvcFsError::Os(err))?
+        .map_err(WsvcFsError::Os)?
         .to_str()
         .unwrap()
         .to_string();
@@ -21,6 +23,27 @@ pub async fn checkout(
             "workspace and repo path can not be the same".to_owned(),
         ));
     }
+    let config = get_config().await?;
+    if let Some(config) = config {
+        if let Some(commit) = config.commit {
+            if let Some(auto_record) = commit.auto_record {
+                if auto_record {
+                    let _ = repo.commit_record(
+                        &workspace,
+                        &commit.author.unwrap_or("BACKUP".to_owned()),
+                        "AUTO BACKUP",
+                    )
+                    .await.ok();
+                }
+            } else {
+                return Err(WsvcError::NeedConfiguring("wsvc can't keep current workspace changes when you checkout to record.\n\ntips: you must `wsvc config set commit.auto_record [true/false]` to determine whether auto commit changes when checkout, if it set to false, unsaved changes will be abandoned.".to_owned()));
+            }
+        } else {
+            return Err(WsvcError::NeedConfiguring("wsvc can't keep current workspace changes when you checkout to record.\n\ntips: you must `wsvc config set commit.auto_record [true/false]` to determine whether auto commit changes when checkout, if it set to false, unsaved changes will be abandoned.".to_owned()));
+        }
+    } else {
+        return Err(WsvcError::NeedConfiguring("wsvc can't keep current workspace changes when you checkout to record.\n\ntips: you must `wsvc config set commit.auto_record [true/false]` to determine whether auto commit changes when checkout, if it set to false, unsaved changes will be abandoned.".to_owned()));
+    }
     if let Some(hash) = hash {
         let hash = hash.to_ascii_lowercase();
         let records = repo.get_records().await?;
@@ -28,7 +51,7 @@ pub async fn checkout(
             .iter()
             .filter(|h| h.hash.0.to_hex().to_ascii_lowercase().starts_with(&hash))
             .collect::<Vec<_>>();
-        if records.len() == 0 {
+        if records.is_empty() {
             return Err(WsvcError::BadUsage(format!(
                 "no record found for hash {}",
                 hash
@@ -40,7 +63,7 @@ pub async fn checkout(
                 let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
                 println!(
                     "{} At: {}\nMessage: {}\n",
-                    format!(
+                    format_args!(
                         "Record {} ({})\nAuthor: {}",
                         &hash_str[0..6].bold(),
                         hash_str.dimmed(),
@@ -55,7 +78,7 @@ pub async fn checkout(
                 hash
             )));
         }
-        repo.checkout_record(&&records[0].hash, &workspace).await?;
+        repo.checkout_record(&records[0].hash, &workspace).await?;
     } else {
         let latest_hash = repo
             .get_latest_record()

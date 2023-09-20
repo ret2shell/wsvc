@@ -32,8 +32,10 @@ async-recursion = "1.0"
 
 # cli dependencies
 once_cell = { version = "1.18", optional = true }
-clap = { version = "4.4" ,features = ["derive"], optional = true }
-colored = {version = "2.0", optional = true }
+clap = { version = "4.4", features = ["derive"], optional = true }
+colored = { version = "2.0", optional = true }
+toml = { version = "0.8", optional = true }
+dirs = { version = "5.0", optional = true }
 
 # server dependencies
 axum = { version = "0.6", features = [
@@ -42,16 +44,31 @@ axum = { version = "0.6", features = [
     "http2",
     "multipart",
     "macros",
-], optional = true}
-hyper = { version = "0.14", features = ["full"], optional = true}
-tower = {version = "0.4", optional = true}
-tower-http = { version = "0.4", features = ["trace"], optional = true}
+], optional = true }
+hyper = { version = "0.14", features = ["full"], optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.4", features = ["trace"], optional = true }
 
 # both cli & server
-tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"], optional = true }
+tokio-tungstenite = { version = "0.20", features = [
+    "rustls-tls-native-roots",
+], optional = true }
 
 [features]
 default = ["all"]
-cli = ["dep:once_cell", "dep:clap", "dep:tokio-tungstenite", "dep:colored"]
-server = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:tokio-tungstenite"]
+cli = [
+    "dep:once_cell",
+    "dep:clap",
+    "dep:tokio-tungstenite",
+    "dep:colored",
+    "dep:toml",
+    "dep:dirs",
+]
+server = [
+    "dep:axum",
+    "dep:hyper",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tokio-tungstenite",
+]
 all = ["cli", "server"]

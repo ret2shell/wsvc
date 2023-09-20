@@ -28,7 +28,7 @@ impl<'d> Deserialize<'d> for ObjectId {
         D: Deserializer<'d>,
     {
         let s = String::deserialize(deserializer)?;
-        let hash = blake3::Hash::from_hex(&s).map_err(serde::de::Error::custom)?;
+        let hash = blake3::Hash::from_hex(s).map_err(serde::de::Error::custom)?;
         Ok(ObjectId(hash))
     }
 }
@@ -43,7 +43,7 @@ impl TryFrom<String> for ObjectId {
     type Error = blake3::HexError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        let hash = blake3::Hash::from_hex(&s)?;
+        let hash = blake3::Hash::from_hex(s)?;
         Ok(ObjectId(hash))
     }
 }

@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use blake3::{Hash, HexError};
-use colored::Colorize;
 use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
@@ -32,8 +31,8 @@ pub enum WsvcFsError {
     InvalidOsString(String),
     #[error("dir already exists: {0}")]
     DirAlreadyExists(String),
-    #[error("no changes were made after the latest record")]
-    NoChanges,
+    #[error("no changes with record: {0}")]
+    NoChanges(String),
 }
 
 #[derive(Clone, Debug)]
@@ -118,7 +117,10 @@ async fn checkout_blob_file_impl(
 }
 
 #[async_recursion::async_recursion(?Send)]
-async fn store_tree_file_impl(tree: TreeImpl, trees_dir: &Path) -> Result<Tree, WsvcFsError> {
+async fn store_tree_file_impl(
+    tree: TreeImpl,
+    trees_dir: &Path,
+) -> Result<(Tree, bool), WsvcFsError> {
     let mut result = Tree {
         name: tree.name,
         hash: ObjectId(Hash::from([0; 32])),
@@ -128,17 +130,21 @@ async fn store_tree_file_impl(tree: TreeImpl, trees_dir: &Path) -> Result<Tree, 
     for tree in tree.trees {
         result
             .trees
-            .push(store_tree_file_impl(tree, trees_dir.clone()).await?.hash);
+            .push(store_tree_file_impl(tree, trees_dir.clone()).await?.0.hash);
     }
     let hash = blake3::hash(serde_json::to_vec(&result)?.as_slice());
     result.hash = ObjectId(hash);
-    write(
-        trees_dir.join(hash.to_string()),
-        serde_json::to_vec(&result)?,
-    )
-    .await?;
+    let tree_file_path = trees_dir.join(hash.to_hex().as_str());
+    if !tree_file_path.exists() {
+        write(
+            trees_dir.join(hash.to_string()),
+            serde_json::to_vec(&result)?,
+        )
+        .await?;
+        return Ok((result, true));
+    }
 
-    Ok(result)
+    Ok((result, false))
 }
 
 #[async_recursion::async_recursion(?Send)]
@@ -155,7 +161,6 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
     };
     let mut entries = read_dir(work_dir.clone()).await?;
     while let Some(entry) = entries.next_entry().await? {
-        // println!("{:?}", entry);
         let entry_type = entry.file_type().await?;
         if entry_type.is_dir() {
             if entry.file_name() == ".wsvc" {
@@ -307,7 +312,7 @@ impl Repository {
         checkout_blob_file_impl(
             &workspace.as_ref().join(rel_path),
             &self.objects_dir().await?,
-            &blob_hash,
+            blob_hash,
             &self.temp_dir().await?,
         )
         .await
@@ -348,7 +353,7 @@ impl Repository {
     pub async fn write_tree_recursively(
         &self,
         workspace: impl AsRef<Path> + Clone,
-    ) -> Result<Tree, WsvcFsError> {
+    ) -> Result<(Tree, bool), WsvcFsError> {
         let stored_tree = build_tree(&self.path, workspace.as_ref()).await?;
         let result = store_tree_file_impl(stored_tree, &self.trees_dir().await?).await?;
         Ok(result)
@@ -424,17 +429,32 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn find_record_for_tree(
+        &self,
+        tree_id: &Hash,
+    ) -> Result<Option<Record>, WsvcFsError> {
+        let records = self.get_records().await?;
+        for record in records {
+            let tree = self.read_tree(&record.root).await?;
+            if tree.hash.0 == *tree_id {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn commit_record(
         &self,
         workspace: &Path,
         author: impl AsRef<str>,
         message: impl AsRef<str>,
-    ) -> Result<(), WsvcFsError> {
+    ) -> Result<Record, WsvcFsError> {
         let tree = self.write_tree_recursively(workspace).await?;
-        let latest_record = self.get_latest_record().await?;
-        if let Some(latest_record) = latest_record {
-            if latest_record.root == tree.hash {
-                return Err(WsvcFsError::NoChanges);
+        if !tree.1 {
+            if let Some(record) = self.find_record_for_tree(&tree.0.hash.0).await? {
+                return Err(WsvcFsError::NoChanges(
+                    record.hash.0.to_hex().to_owned().to_string(),
+                ));
             }
         }
         let record = Record {
@@ -442,7 +462,7 @@ impl Repository {
             message: String::from(message.as_ref()),
             author: String::from(author.as_ref()),
             date: chrono::Utc::now(),
-            root: tree.hash,
+            root: tree.0.hash,
         };
         let hash = blake3::hash(serde_json::to_vec(&record)?.as_slice());
         let record = Record {
@@ -452,9 +472,7 @@ impl Repository {
         // write record to HEAD
         self.store_record(&record).await?;
         write(self.path.join("HEAD"), hash.to_hex().to_string()).await?;
-        let hash_str = hash.to_hex().to_ascii_lowercase();
-        println!("Committed as Record {} ({})", &hash_str[0..6].bold(), hash_str);
-        Ok(())
+        Ok(record)
     }
 
     pub async fn read_record(&self, record_hash: &ObjectId) -> Result<Record, WsvcFsError> {
@@ -470,19 +488,14 @@ impl Repository {
         &self,
         record_hash: &ObjectId,
         workspace: &Path,
-    ) -> Result<(), WsvcFsError> {
+    ) -> Result<Record, WsvcFsError> {
         let record = self.read_record(record_hash).await?;
         self.checkout_tree(&self.read_tree(&record.root).await?, workspace)
             .await?;
         // write record to HEAD
         write(self.path.join("HEAD"), record_hash.0.to_hex().to_string()).await?;
-        println!(
-            "Checked out HEAD to {} ({})",
-            &record_hash.0.to_hex()[0..6].bold(),
-            record_hash.0.to_hex()
-        );
         remove_dir_all(self.temp_dir().await?).await?;
-        Ok(())
+        Ok(record)
     }
 
     pub async fn get_records(&self) -> Result<Vec<Record>, WsvcFsError> {
@@ -507,7 +520,7 @@ impl Repository {
 
     pub async fn get_latest_record(&self) -> Result<Option<Record>, WsvcFsError> {
         let mut records = self.get_records().await?;
-        if records.len() == 0 {
+        if records.is_empty() {
             return Ok(None);
         }
         records.sort_by(|a, b| b.date.cmp(&a.date));
@@ -518,7 +531,7 @@ impl Repository {
         let head_hash = read(self.path.join("HEAD")).await?;
         if String::from_utf8(head_hash.clone())
             .map_err(|err| WsvcFsError::InvalidOsString(format!("{:?}", err)))?
-            == "".to_owned()
+            == *""
         {
             return Ok(None);
         }

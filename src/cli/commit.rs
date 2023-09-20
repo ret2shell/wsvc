@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
+use super::config::get_config;
+
 pub async fn commit(
     message: String,
     author: Option<String>,
@@ -9,7 +11,7 @@ pub async fn commit(
     root: Option<String>,
 ) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
-        .map_err(|err| WsvcFsError::Os(err))?
+        .map_err(WsvcFsError::Os)?
         .to_str()
         .unwrap()
         .to_string();
@@ -23,7 +25,24 @@ pub async fn commit(
     }
     repo.commit_record(
         &workspace,
-        &author.unwrap_or(String::from("UNKNOWN")),
+        &author.unwrap_or(
+            get_config()
+                .await?
+                .ok_or(WsvcError::LackOfConfig(
+                    "commit.author".to_owned(),
+                    "wsvc config set commit.author [--global]".to_owned(),
+                ))?
+                .commit
+                .ok_or(WsvcError::LackOfConfig(
+                    "commit.author".to_owned(),
+                    "wsvc config set commit.author [--global]".to_owned(),
+                ))?
+                .author
+                .ok_or(WsvcError::LackOfConfig(
+                    "commit.author".to_owned(),
+                    "wsvc config set commit.author [--global]".to_owned(),
+                ))?,
+        ),
         &message,
     )
     .await?;

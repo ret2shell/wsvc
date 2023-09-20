@@ -7,7 +7,7 @@ pub async fn logs(
     limit: Option<usize>,
 ) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir()
-        .map_err(|err| WsvcFsError::Os(err))?
+        .map_err(WsvcFsError::Os)?
         .to_str()
         .unwrap()
         .to_string();
@@ -42,7 +42,7 @@ pub async fn logs(
         };
         println!(
             "{} At: {}\nMessage: {}\n",
-            format!(
+            format_args!(
                 "Record {} ({}) {}\nAuthor: {}",
                 &hash_str[0..6].bold(),
                 hash_str.dimmed(),

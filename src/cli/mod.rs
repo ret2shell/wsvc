@@ -2,8 +2,9 @@ use clap::{command, Parser};
 use wsvc::WsvcError;
 
 mod checkout;
-mod create;
 mod commit;
+mod config;
+mod create;
 mod logs;
 mod transport;
 
@@ -68,6 +69,47 @@ enum WsvcCli {
         #[clap(short, long)]
         limit: Option<usize>,
     },
+    /// clone a repository
+    Clone {
+        /// the remote repository url
+        url: String,
+        /// the local repository dir
+        dir: Option<String>,
+    },
+    /// sync a repository with remote origin
+    Sync,
+    /// manage global/repository config
+    Config {
+        #[clap(subcommand)]
+        subcmd: ConfigSubCmd,
+    },
+}
+
+#[derive(Parser)]
+enum ConfigSubCmd {
+    /// get config
+    Get {
+        /// config key
+        key: String,
+    },
+    /// set config
+    Set {
+        /// config key
+        key: String,
+        /// config value
+        value: String,
+        /// whether set global config
+        #[clap(short, long, action = clap::ArgAction::SetTrue)]
+        global: Option<bool>,
+    },
+    /// unset config
+    Unset {
+        /// config key
+        key: String,
+        /// whether unset global config
+        #[clap(short, long, action = clap::ArgAction::SetTrue)]
+        global: Option<bool>,
+    },
 }
 
 pub async fn run() -> Result<(), WsvcError> {
@@ -87,5 +129,14 @@ pub async fn run() -> Result<(), WsvcError> {
         WsvcCli::Init { bare } => create::init(bare).await,
         WsvcCli::New { name, bare } => create::new(name, bare).await,
         WsvcCli::Logs { root, skip, limit } => logs::logs(root, skip, limit).await,
+        WsvcCli::Clone { url, dir } => transport::clone(url, dir).await,
+        WsvcCli::Sync => transport::sync().await,
+        WsvcCli::Config { subcmd } => match subcmd {
+            ConfigSubCmd::Get { key } => config::get(key).await,
+            ConfigSubCmd::Set { key, value, global } => {
+                config::set(key, value, global.unwrap_or(false)).await
+            }
+            ConfigSubCmd::Unset { key, global } => config::unset(key, global.unwrap_or(false)).await,
+        },
     }
 }
