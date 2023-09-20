@@ -1,0 +1,31 @@
+use std::path::PathBuf;
+
+use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
+
+pub async fn commit(
+    message: String,
+    author: Option<String>,
+    workspace: Option<String>,
+    root: Option<String>,
+) -> Result<(), WsvcError> {
+    let pwd = std::env::current_dir()
+        .map_err(|err| WsvcFsError::Os(err))?
+        .to_str()
+        .unwrap()
+        .to_string();
+    let workspace = PathBuf::from(workspace.unwrap_or(pwd.clone()));
+    let root = root.unwrap_or(pwd);
+    let repo = Repository::try_open(root).await?;
+    if repo.path == workspace {
+        return Err(WsvcError::BadUsage(
+            "workspace and repo path can not be the same".to_owned(),
+        ));
+    }
+    repo.commit_record(
+        &workspace,
+        &author.unwrap_or(String::from("UNKNOWN")),
+        &message,
+    )
+    .await?;
+    Ok(())
+}
