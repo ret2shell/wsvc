@@ -41,15 +41,12 @@ pub async fn logs(
             "".to_owned()
         };
         println!(
-            "{} At: {}\nMessage: {}\n",
-            format_args!(
-                "Record {} ({}) {}\nAuthor: {}",
-                &hash_str[0..6].bold(),
-                hash_str.dimmed(),
-                cursor,
-                record.author.bright_blue()
-            ),
+            "Record {} ({}) {}\nAt: {} Author: {}\nMessage: {}\n",
+            &hash_str[0..6].bold(),
+            hash_str.dimmed(),
+            cursor,
             record.date.naive_local().to_string().yellow(),
+            record.author.bright_blue(),
             record.message
         );
     }
