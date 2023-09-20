@@ -8,7 +8,7 @@ use wsvc::model::Repository;
 #[derive(Parser)]
 #[command(name = "wsvc")]
 #[command(bin_name = "wsvc")]
-enum Cli {
+enum WsvcCli {
     /// record a snapshot of workspace.
     #[command(name = "commit")]
     Commit {
@@ -64,9 +64,9 @@ enum Cli {
 }
 
 pub async fn run() {
-    let cli = Cli::parse();
+    let cli = WsvcCli::parse();
     match cli {
-        Cli::Commit {
+        WsvcCli::Commit {
             message,
             author,
             workspace,
@@ -74,20 +74,20 @@ pub async fn run() {
         } => {
             commit(message, author, workspace, root).await;
         }
-        Cli::Checkout {
+        WsvcCli::Checkout {
             hash,
             workspace,
             root,
         } => {
             checkout(hash, workspace, root).await;
         }
-        Cli::Init { bare } => {
+        WsvcCli::Init { bare } => {
             init(bare).await;
         }
-        Cli::New { name, bare } => {
+        WsvcCli::New { name, bare } => {
             new(name, bare).await;
         }
-        Cli::Logs { root, skip, limit } => {
+        WsvcCli::Logs { root, skip, limit } => {
             logs(root, skip, limit).await;
         }
     }

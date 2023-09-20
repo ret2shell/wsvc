@@ -5,7 +5,7 @@ use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
 use tokio::{
-    fs::{create_dir_all, read_dir, remove_file, rename, write, File},
+    fs::{create_dir_all, read_dir, remove_file, rename, write, File, remove_dir_all},
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
@@ -54,7 +54,7 @@ async fn store_blob_file_impl(
     if !temp.as_ref().exists() {
         create_dir_all(temp.as_ref()).await?;
     }
-    let mut buffer: [u8; 1024] = [0; 1024];
+    let mut buffer: [u8; 16384] = [0; 16384];
     let mut file = File::open(&path).await?;
     let compressed_file_path = temp.as_ref().join(nanoid!());
     let mut compressed_file = File::create(&compressed_file_path).await?;
@@ -89,7 +89,7 @@ async fn checkout_blob_file_impl(
     temp: impl AsRef<Path>,
 ) -> Result<(), WsvcFsError> {
     let blob_path = objects_dir.as_ref().join(blob_hash.0.to_hex().as_str());
-    let mut buffer: [u8; 2048] = [0; 2048];
+    let mut buffer: [u8; 32768] = [0; 32768];
     let mut header_buffer: [u8; 4] = [0; 4];
     let mut file = File::open(&blob_path).await?;
     let decompressed_file_path = temp.as_ref().join(nanoid!());
@@ -367,66 +367,49 @@ impl Repository {
         // collect files to be deleted
         // delete files that not in the tree or hash not match
         let mut entries = read_dir(workspace).await?;
-        let mut dirs = vec![];
+        let mut should_be_del = vec![];
         while let Some(entry) = entries.next_entry().await? {
-            let entry_type = entry.file_type().await?;
-            if entry_type.is_file() {
-                let mut found = false;
-                for blob in &tree.blobs {
-                    if blob.name
-                        == entry
-                            .file_name()
-                            .to_str()
-                            .ok_or(WsvcFsError::InvalidOsString)?
-                    {
-                        if !blob.checksum(workspace.join(&blob.name)).await? {
-                            remove_file(workspace.join(&blob.name)).await?;
-                        }
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    remove_file(
-                        workspace.join(
-                            entry
-                                .file_name()
-                                .to_str()
-                                .ok_or(WsvcFsError::InvalidOsString)?,
-                        ),
-                    )
-                    .await?;
-                }
-            } else {
-                if entry.file_name() == ".wsvc" {
-                    continue;
-                }
-                dirs.push(entry.path());
-            }
+            should_be_del.push(entry.file_name());
         }
 
-        // checkout trees
         for tree in &tree.trees {
             let tree = self.read_tree(tree).await?;
             let tree_path = workspace.join(&tree.name);
             if !tree_path.exists() {
                 create_dir_all(&tree_path).await?;
-            }
-            if let Some(pos) = dirs.iter().position(|p| p.eq(&tree_path)) {
-                // println!("found, should not remove {:?}", dirs[pos]);
-                dirs.remove(pos);
+            } else {
+                if !tree_path.is_dir() {
+                    remove_file(&tree_path).await?;
+                }
+                if let Some(pos) = should_be_del
+                    .iter()
+                    .position(|x| x == tree_path.file_name().unwrap_or_default())
+                {
+                    should_be_del.remove(pos);
+                }
             }
             self.checkout_tree(&tree, &tree_path).await?;
         }
-        // remove dirs
-        for dir in dirs {
-            // println!("remove dir {:?}", dir);
-            tokio::fs::remove_dir_all(dir).await?;
-        }
         for blob in &tree.blobs {
-            // println!("should checkout blob: {:?}", blob);
-            self.checkout_blob(&blob.hash, &workspace, &blob.name)
-                .await?;
+            let blob_path = workspace.join(&blob.name);
+            if !blob_path.exists() || !blob.checksum(&blob_path).await? {
+                self.checkout_blob(&blob.hash, &workspace, &blob.name)
+                    .await?;
+            }
+            if let Some(pos) = should_be_del
+                .iter()
+                .position(|x| x == blob_path.file_name().unwrap_or_default())
+            {
+                should_be_del.remove(pos);
+            }
+        }
+        for entry in should_be_del {
+            let entry_path = workspace.join(entry);
+            if entry_path.is_dir() {
+                remove_dir_all(entry_path).await?;
+            } else {
+                remove_file(entry_path).await?;
+            }
         }
         Ok(())
     }
@@ -493,6 +476,7 @@ impl Repository {
             .await?;
         // write record to HEAD
         write(self.path.join("HEAD"), record_hash.0.to_hex().to_string()).await?;
+        remove_dir_all(self.temp_dir().await?).await?;
         Ok(())
     }
 
@@ -542,7 +526,7 @@ impl Repository {
 impl Blob {
     pub async fn checksum(&self, rel_path: impl AsRef<Path>) -> Result<bool, WsvcFsError> {
         let mut file = File::open(rel_path).await?;
-        let mut buffer: [u8; 1024] = [0; 1024];
+        let mut buffer: [u8; 16384] = [0; 16384];
         let mut hasher = blake3::Hasher::new();
         loop {
             let n = file.read(&mut buffer).await?;
