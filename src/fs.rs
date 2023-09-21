@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use blake3::{Hash, HexError};
-use futures::Future;
 use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
@@ -13,6 +12,29 @@ use tokio::{
 use crate::model::Record;
 
 use super::model::{Blob, ObjectId, Repository, Tree};
+
+pub struct RepoGuard {
+    pub repo: Repository,
+}
+
+impl RepoGuard {
+    pub async fn new(repo: &Repository) -> Result<Self, WsvcFsError> {
+        repo.check_lock().await?;
+        repo.lock().await?;
+        Ok(Self {
+            repo: repo.clone(),
+        })
+    }
+}
+
+impl Drop for RepoGuard {
+    fn drop(&mut self) {
+        let repo = self.repo.clone();
+        tokio::spawn(async move {
+            repo.unlock().await.ok();
+        });
+    }
+}
 
 /// Error type for wsvc fs.
 #[derive(Error, Debug)]
@@ -284,21 +306,6 @@ impl Repository {
     pub async fn unlock(&self) -> Result<(), WsvcFsError> {
         remove_file(self.path.join("LOCK")).await?;
         Ok(())
-    }
-
-    /// lock guard helper
-    pub async fn with_lock<T, AsyncResult>(
-        &self,
-        f: impl FnOnce() -> AsyncResult,
-    ) -> Result<T, WsvcFsError>
-    where
-        AsyncResult: Future<Output = Result<T, WsvcFsError>>,
-    {
-        self.check_lock().await?;
-        self.lock().await?;
-        let result = f().await;
-        self.unlock().await?;
-        result
     }
 
     /// try open a repository at path.
