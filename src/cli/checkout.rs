@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
 use colored::Colorize;
-use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
+use wsvc::{
+    fs::{RepoGuard, WsvcFsError},
+    model::Repository,
+    WsvcError,
+};
 
 use super::config::{get_config, Commit};
 
@@ -18,6 +22,7 @@ pub async fn checkout(
     let workspace = PathBuf::from(workspace.unwrap_or(pwd.clone()));
     let root = root.unwrap_or(pwd);
     let repo = Repository::try_open(root).await?;
+    let guard = RepoGuard::new(&repo).await?;
     if repo.path == workspace {
         return Err(WsvcError::BadUsage(
             "workspace and repo path can not be the same".to_owned(),
@@ -109,5 +114,6 @@ pub async fn checkout(
             hash
         );
     }
+    drop(guard);
     Ok(())
 }

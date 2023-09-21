@@ -13,7 +13,7 @@ Challenge deployment tool for Ret2Shell platform.
 ### Build
 
 ```shell
-cargo build
+cargo build --release --bin wsvc --features=cli
 ```
 
 the binary cli could be found at `target/release/wsvc`.

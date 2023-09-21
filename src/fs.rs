@@ -21,18 +21,14 @@ impl RepoGuard {
     pub async fn new(repo: &Repository) -> Result<Self, WsvcFsError> {
         repo.check_lock().await?;
         repo.lock().await?;
-        Ok(Self {
-            repo: repo.clone(),
-        })
+        Ok(Self { repo: repo.clone() })
     }
 }
 
 impl Drop for RepoGuard {
     fn drop(&mut self) {
         let repo = self.repo.clone();
-        tokio::spawn(async move {
-            repo.unlock().await.ok();
-        });
+        repo.unlock().ok();
     }
 }
 
@@ -291,7 +287,11 @@ impl Repository {
 
     /// check if the repository is locked.
     pub async fn check_lock(&self) -> Result<(), WsvcFsError> {
-        let lock = read(self.path.join("LOCK")).await?;
+        let lock_path = self.path.join("LOCK");
+        if !lock_path.exists() {
+            return Ok(());
+        }
+        let lock = read(&lock_path).await?;
         if String::from_utf8(lock)
             .map_err(|err| WsvcFsError::InvalidOsString(format!("{:?}", err)))?
             == self.lock
@@ -303,8 +303,8 @@ impl Repository {
     }
 
     /// unlock repository.
-    pub async fn unlock(&self) -> Result<(), WsvcFsError> {
-        remove_file(self.path.join("LOCK")).await?;
+    pub fn unlock(&self) -> Result<(), WsvcFsError> {
+        std::fs::remove_file(self.path.join("LOCK"))?;
         Ok(())
     }
 

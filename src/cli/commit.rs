@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use colored::Colorize;
-use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
+use wsvc::{fs::{WsvcFsError, RepoGuard}, model::Repository, WsvcError};
 
 use super::config::get_config;
 
@@ -19,6 +19,7 @@ pub async fn commit(
     let workspace = PathBuf::from(workspace.unwrap_or(pwd.clone()));
     let root = root.unwrap_or(pwd);
     let repo = Repository::try_open(root).await?;
+    let guard = RepoGuard::new(&repo).await?;
     if repo.path == workspace {
         return Err(WsvcError::BadUsage(
             "workspace and repo path can not be the same".to_owned(),
@@ -50,5 +51,6 @@ pub async fn commit(
         .await?;
     let hash = record.hash.0.to_hex().to_string();
     println!("Committed record: {} ({})", hash[0..6].green().bold(), hash);
+    drop(guard);
     Ok(())
 }
