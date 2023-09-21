@@ -1,6 +1,6 @@
 [package]
 name = "wsvc"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Reverier-Xu <reverier.xu@woooo.tech>"]
 description = "WebSocket Simple Version Control tool."
