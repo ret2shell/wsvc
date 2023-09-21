@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use blake3::{Hash, HexError};
+use futures::Future;
 use miniz_oxide::{deflate::compress_to_vec, inflate::decompress_to_vec};
 use nanoid::nanoid;
 use thiserror::Error;
@@ -124,7 +125,7 @@ async fn checkout_blob_file_impl(
 /// Store a tree file to trees dir.
 /// Return a tuple of `(tree, is_new)`.
 /// `is_new` means whether the tree is new created.
-/// 
+///
 /// Noticed that this function is recursive.
 #[async_recursion::async_recursion(?Send)]
 async fn store_tree_file_impl(
@@ -158,7 +159,7 @@ async fn store_tree_file_impl(
 }
 
 /// Build a tree from a work dir.
-/// 
+///
 /// all blobs will be stored to objects dir when building.
 #[async_recursion::async_recursion(?Send)]
 async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsError> {
@@ -219,7 +220,10 @@ impl Repository {
         } else {
             return Err(WsvcFsError::DirAlreadyExists(format!("{:?}", path)));
         }
-        Ok(Self { path, lock: nanoid!() })
+        Ok(Self {
+            path,
+            lock: nanoid!(),
+        })
     }
 
     /// open a repository at path.
@@ -240,7 +244,10 @@ impl Repository {
             && path.join("records").exists()
             && path.join("HEAD").exists()
         {
-            Ok(Self { path, lock: nanoid!() })
+            Ok(Self {
+                path,
+                lock: nanoid!(),
+            })
         } else {
             Err(WsvcFsError::UnknownPath(
                 path.to_str()
@@ -251,7 +258,7 @@ impl Repository {
     }
 
     /// lock repository for write.
-    /// 
+    ///
     /// notice that the Repository struct is `Clone`able, so there is still risky when you
     /// cloned multiple Repository struct in different threads. it is recommended to construct
     /// `Repository` everytime when you need it, the `lock` function is just for convenience.
@@ -279,8 +286,23 @@ impl Repository {
         Ok(())
     }
 
+    /// lock guard helper
+    pub async fn with_lock<T, AsyncResult>(
+        &self,
+        f: impl FnOnce() -> AsyncResult,
+    ) -> Result<T, WsvcFsError>
+    where
+        AsyncResult: Future<Output = Result<T, WsvcFsError>>,
+    {
+        self.check_lock().await?;
+        self.lock().await?;
+        let result = f().await;
+        self.unlock().await?;
+        result
+    }
+
     /// try open a repository at path.
-    /// 
+    ///
     /// the `bare` option will be guessed.
     pub async fn try_open(path: impl AsRef<Path>) -> Result<Self, WsvcFsError> {
         if let Ok(repo) = Repository::open(&path, false).await {
@@ -582,7 +604,10 @@ impl Repository {
     }
 
     /// get all trees of a record
-    pub async fn get_trees_of_record(&self, record_hash: &ObjectId) -> Result<Vec<Tree>, WsvcFsError> {
+    pub async fn get_trees_of_record(
+        &self,
+        record_hash: &ObjectId,
+    ) -> Result<Vec<Tree>, WsvcFsError> {
         let record = self.read_record(record_hash).await?;
         let mut result = Vec::new();
         let mut queue = vec![record.root];
