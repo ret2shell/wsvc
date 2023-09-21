@@ -1,9 +1,9 @@
 use std::string::FromUtf8Error;
-use toml::{de, ser};
 use thiserror::Error;
+use toml::{de, ser};
 
-pub mod model;
 pub mod fs;
+pub mod model;
 #[cfg(feature = "server")]
 pub mod server;
 

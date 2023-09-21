@@ -218,9 +218,9 @@ async fn recv_file(
 }
 
 /// `sync_with` syncs repository with client.
-/// 
+///
 /// ## arguments
-/// 
+///
 /// * `repo` - repository to sync with.
 /// * `ws` - websocket connection from axum.
 pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), WsvcServerError> {

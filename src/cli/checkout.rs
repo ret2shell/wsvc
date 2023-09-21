@@ -40,14 +40,21 @@ pub async fn checkout(
         return Err(WsvcError::NeedConfiguring(tips.to_owned()));
     }
     if auto_record {
-        let record = repo.commit_record(
-            &workspace,
-            format!("{} BACKUP", commit.author.unwrap_or("DEFAULT".to_owned())),
-            "auto backup by checkout",
-        ).await.ok();
+        let record = repo
+            .commit_record(
+                &workspace,
+                format!("{} BACKUP", commit.author.unwrap_or("DEFAULT".to_owned())),
+                "auto backup by checkout",
+            )
+            .await
+            .ok();
         if let Some(record) = record {
             let hash = record.hash.0.to_hex().to_string();
-            println!("Auto-backup created a record: {} ({})", hash[0..6].green().bold(), hash);
+            println!(
+                "Auto-backup created a record: {} ({})",
+                hash[0..6].green().bold(),
+                hash
+            );
         }
     }
     if let Some(hash) = hash {
@@ -83,7 +90,11 @@ pub async fn checkout(
         }
         let record = repo.checkout_record(&records[0].hash, &workspace).await?;
         let hash = record.hash.0.to_hex().to_string();
-        println!("Checked-out record: {} ({})", hash[0..6].green().bold(), hash);
+        println!(
+            "Checked-out record: {} ({})",
+            hash[0..6].green().bold(),
+            hash
+        );
     } else {
         let latest_hash = repo
             .get_latest_record()
@@ -92,7 +103,11 @@ pub async fn checkout(
             .hash;
         let record = repo.checkout_record(&latest_hash, &workspace).await?;
         let hash = record.hash.0.to_hex().to_string();
-        println!("Checked-out latest record: {} ({})", hash[0..6].green().bold(), hash);
+        println!(
+            "Checked-out latest record: {} ({})",
+            hash[0..6].green().bold(),
+            hash
+        );
     }
     Ok(())
 }

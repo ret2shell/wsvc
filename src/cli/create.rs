@@ -1,5 +1,4 @@
-use wsvc::{model::Repository, fs::WsvcFsError, WsvcError};
-
+use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
 pub async fn init(bare: Option<bool>) -> Result<(), WsvcError> {
     let pwd = std::env::current_dir().map_err(WsvcFsError::Os)?;

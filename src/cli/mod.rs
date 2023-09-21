@@ -136,7 +136,9 @@ pub async fn run() -> Result<(), WsvcError> {
             ConfigSubCmd::Set { key, value, global } => {
                 config::set(key, value, global.unwrap_or(false)).await
             }
-            ConfigSubCmd::Unset { key, global } => config::unset(key, global.unwrap_or(false)).await,
+            ConfigSubCmd::Unset { key, global } => {
+                config::unset(key, global.unwrap_or(false)).await
+            }
         },
     }
 }

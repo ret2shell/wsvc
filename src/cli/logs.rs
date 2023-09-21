@@ -1,5 +1,5 @@
 use colored::Colorize;
-use wsvc::{model::Repository, WsvcError, fs::WsvcFsError};
+use wsvc::{fs::WsvcFsError, model::Repository, WsvcError};
 
 pub async fn logs(
     root: Option<String>,
