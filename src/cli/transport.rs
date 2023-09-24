@@ -200,7 +200,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         .get_records()
         .await
         .map_err(|err| WsvcError::FsError(err))?;
-    let client_want_records_with_state = remote_records
+    let wanted_records = remote_records
         .iter()
         .filter(|r| !local_records.contains(r))
         .map(|r| server::RecordWithState {
@@ -208,7 +208,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
             state: 1,
         })
         .collect::<Vec<_>>();
-    let client_will_give_records_with_state = local_records
+    let will_given_records = local_records
         .iter()
         .filter(|r| !remote_records.contains(r))
         .map(|r| server::RecordWithState {
@@ -216,35 +216,33 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
             state: 2,
         })
         .collect::<Vec<_>>();
-    let mut diff_records = Vec::with_capacity(
-        client_want_records_with_state.len() + client_will_give_records_with_state.len(),
-    );
-    diff_records.extend_from_slice(&client_want_records_with_state);
-    diff_records.extend_from_slice(&client_will_give_records_with_state);
+    let mut diff_records = Vec::with_capacity(wanted_records.len() + will_given_records.len());
+    diff_records.extend_from_slice(&wanted_records);
+    diff_records.extend_from_slice(&will_given_records);
     let packet_body = serde_json::to_string(&diff_records)?;
     send_data(&mut ws, packet_body.into_bytes()).await?;
 
     // the second round for client, sync trees
     let packet_body = recv_data(&mut ws).await?;
-    let client_wanted_trees: Vec<Tree> = serde_json::from_slice(&packet_body)?;
-    tracing::debug!("recv trees: {:?}", client_wanted_trees);
-    let mut client_will_give_trees = Vec::new();
-    for record_with_state in &client_want_records_with_state {
-        client_will_give_trees.extend_from_slice(
+    let wanted_trees: Vec<Tree> = serde_json::from_slice(&packet_body)?;
+    tracing::debug!("recv trees: {:?}", wanted_trees);
+    let mut will_given_trees = Vec::new();
+    for record_with_state in &wanted_records {
+        will_given_trees.extend_from_slice(
             &repo
                 .get_trees_of_record(&record_with_state.record.hash)
                 .await
                 .map_err(WsvcError::FsError)?,
         );
     }
-    let packet_body = serde_json::to_string(&client_will_give_trees)?;
+    let packet_body = serde_json::to_string(&will_given_trees)?;
     send_data(&mut ws, packet_body.into_bytes()).await?;
-    tracing::debug!("send trees: {:?}", client_will_give_trees);
+    tracing::debug!("send trees: {:?}", will_given_trees);
 
     // the third round for client, sync blobs
-    let mut client_wanted_blobs_with_states = Vec::new();
-    for tree in &client_wanted_trees {
-        client_wanted_blobs_with_states.extend_from_slice(
+    let mut wanted_blobs = Vec::new();
+    for tree in &wanted_trees {
+        wanted_blobs.extend_from_slice(
             &(tree
                 .blobs
                 .iter()
@@ -255,9 +253,9 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
                 .collect::<Vec<_>>()),
         )
     }
-    let mut client_will_give_blobs_with_states = Vec::new();
-    for tree in &client_will_give_trees {
-        client_will_give_blobs_with_states.extend_from_slice(
+    let mut will_given_blobs = Vec::new();
+    for tree in &will_given_trees {
+        will_given_blobs.extend_from_slice(
             &(tree
                 .blobs
                 .iter()
@@ -268,11 +266,9 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
                 .collect::<Vec<_>>()),
         )
     }
-    let mut diff_blobs = Vec::with_capacity(
-        client_wanted_blobs_with_states.len() + client_will_give_blobs_with_states.len(),
-    );
-    diff_blobs.extend_from_slice(&client_wanted_blobs_with_states);
-    diff_blobs.extend_from_slice(&client_will_give_blobs_with_states);
+    let mut diff_blobs = Vec::with_capacity(wanted_blobs.len() + will_given_blobs.len());
+    diff_blobs.extend_from_slice(&wanted_blobs);
+    diff_blobs.extend_from_slice(&will_given_blobs);
     tracing::debug!("send diff blobs: {:?}", diff_blobs);
     let packet_body = serde_json::to_vec(&diff_blobs)?;
     send_data(&mut ws, packet_body).await?;
@@ -281,14 +277,14 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     create_dir_all(temp_dir.join("objects"))
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-    let mut blob_count = client_wanted_blobs_with_states.len();
+    let mut blob_count = wanted_blobs.len();
     let dir = temp_dir.join("objects");
     while blob_count > 0 {
         recv_file(&mut ws, &dir).await?;
         blob_count -= 1;
     }
 
-    for blob_with_state in client_will_give_blobs_with_states {
+    for blob_with_state in will_given_blobs {
         let blob_path = repo
             .objects_dir()
             .await
@@ -305,7 +301,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         )
         .await?;
     }
-    for blob_with_state in &client_wanted_blobs_with_states {
+    for blob_with_state in &wanted_blobs {
         tracing::debug!("checking blob file: {:?}", blob_with_state.blob);
         if !blob_with_state
             .blob
@@ -338,7 +334,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     // store trees
     tracing::debug!("write trees to tree database...");
     let trees_dir = repo.trees_dir().await.map_err(WsvcError::FsError)?;
-    for tree in &client_wanted_trees {
+    for tree in &wanted_trees {
         write(
             trees_dir.join(tree.hash.0.to_hex().as_str()),
             serde_json::to_string(tree)
@@ -351,7 +347,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     // store records
     tracing::debug!("write records to record database...");
     let records_dir = repo.records_dir().await.map_err(WsvcError::FsError)?;
-    for record_with_state in &client_want_records_with_state {
+    for record_with_state in &wanted_records {
         write(
             records_dir.join(record_with_state.record.hash.0.to_hex().as_str()),
             serde_json::to_string(&record_with_state.record)
