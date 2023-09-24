@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
 use colored::Colorize;
-use wsvc::{fs::{WsvcFsError, RepoGuard}, model::Repository, WsvcError};
+use wsvc::{
+    fs::{RepoGuard, WsvcFsError},
+    model::Repository,
+    WsvcError,
+};
 
 use super::config::get_config;
 
