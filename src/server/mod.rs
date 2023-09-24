@@ -28,14 +28,14 @@ pub enum WsvcServerError {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct RecordWithState {
+pub struct RecordWithState {
     pub record: Record,
     /// 0: same, 1: wanted, 2: will-give
     pub state: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct BlobWithState {
+pub struct BlobWithState {
     pub blob: Blob,
     /// 0: same, 1: wanted, 2: will-give
     pub state: i32,

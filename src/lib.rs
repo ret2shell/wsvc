@@ -26,4 +26,12 @@ pub enum WsvcError {
     LackOfConfig(String, String),
     #[error("need configuring: {0}")]
     NeedConfiguring(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+    #[error("network error: {0}")]
+    NetworkError(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("data error: {0}")]
+    DataError(String),
+    #[error("repo without record")]
+    EmptyRepoError,
 }

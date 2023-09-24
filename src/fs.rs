@@ -656,6 +656,20 @@ impl Repository {
             .await?,
         ))
     }
+
+    pub async fn write_origin(&self, url: String) -> Result<(), WsvcFsError> {
+        // write remote repo url to ORIGIN
+        write(self.path.join("ORIGIN"), url)
+            .await
+            .map_err(|err| WsvcFsError::Os(err))
+    }
+
+    pub async fn read_origin(&self) -> Result<String, WsvcFsError> {
+        // read remote repo url from ORIGIN
+        tokio::fs::read_to_string(self.path.join("ORIGIN"))
+            .await
+            .map_err(|err| WsvcFsError::Os(err))
+    }
 }
 
 impl Blob {

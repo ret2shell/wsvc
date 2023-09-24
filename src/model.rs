@@ -74,7 +74,7 @@ pub struct Tree {
     pub blobs: Vec<Blob>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 /// `Record` stand for a commit.
 pub struct Record {
     pub hash: ObjectId,

@@ -2,3 +2,4 @@
 Cargo.lock
 .devcontainer/devcontainer.json
 /test
+.vscode/settings.json
