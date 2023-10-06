@@ -64,7 +64,7 @@ tokio-tungstenite = { version = "0.20", features = [
 
 
 [features]
-default = ["server"]
+default = ["all"]
 cli = [
     "dep:once_cell",
     "dep:clap",
