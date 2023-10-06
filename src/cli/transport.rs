@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
 use tokio::{
@@ -195,7 +195,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(origin).await?;
     let packet_body = recv_data(&mut ws).await?;
     let remote_records: Vec<Record> = serde_json::from_slice(&packet_body)?;
-    tracing::debug!("recv records: {:?}", remote_records);
+    // tracing::debug!("recv records: {:?}", remote_records);
     let local_records = repo
         .get_records()
         .await
@@ -225,7 +225,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     // the second round for client, sync trees
     let packet_body = recv_data(&mut ws).await?;
     let wanted_trees: Vec<Tree> = serde_json::from_slice(&packet_body)?;
-    tracing::debug!("recv trees: {:?}", wanted_trees);
+    // tracing::debug!("recv trees: {:?}", wanted_trees);
     let mut will_given_trees = Vec::new();
     for record_with_state in &wanted_records {
         will_given_trees.extend_from_slice(
@@ -237,7 +237,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     }
     let packet_body = serde_json::to_string(&will_given_trees)?;
     send_data(&mut ws, packet_body.into_bytes()).await?;
-    tracing::debug!("send trees: {:?}", will_given_trees);
+    // tracing::debug!("send trees: {:?}", will_given_trees);
 
     // the third round for client, sync blobs
     let mut wanted_blobs = Vec::new();
@@ -269,7 +269,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     let mut diff_blobs = Vec::with_capacity(wanted_blobs.len() + will_given_blobs.len());
     diff_blobs.extend_from_slice(&wanted_blobs);
     diff_blobs.extend_from_slice(&will_given_blobs);
-    tracing::debug!("send diff blobs: {:?}", diff_blobs);
+    // tracing::debug!("send diff blobs: {:?}", diff_blobs);
     let packet_body = serde_json::to_vec(&diff_blobs)?;
     send_data(&mut ws, packet_body).await?;
 
@@ -293,7 +293,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         let file = File::open(blob_path)
             .await
             .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-        tracing::debug!("sending blob file: {:?}", blob_with_state.blob.hash);
+        // tracing::debug!("sending blob file: {:?}", blob_with_state.blob.hash);
         send_file(
             &mut ws,
             &blob_with_state.blob.hash.0.to_hex().as_str(),
@@ -302,7 +302,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         .await?;
     }
     for blob_with_state in &wanted_blobs {
-        tracing::debug!("checking blob file: {:?}", blob_with_state.blob);
+        // tracing::debug!("checking blob file: {:?}", blob_with_state.blob);
         if !blob_with_state
             .blob
             .checksum(&dir.join(blob_with_state.blob.hash.0.to_hex().as_str()))
@@ -316,7 +316,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         }
     }
 
-    tracing::debug!("moving blob files to object database...");
+    // tracing::debug!("moving blob files to object database...");
     let objects_dir = repo.objects_dir().await.map_err(WsvcError::FsError)?;
     let mut entries = read_dir(&dir)
         .await
@@ -332,7 +332,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     }
 
     // store trees
-    tracing::debug!("write trees to tree database...");
+    // tracing::debug!("write trees to tree database...");
     let trees_dir = repo.trees_dir().await.map_err(WsvcError::FsError)?;
     for tree in &wanted_trees {
         write(
@@ -345,7 +345,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     }
 
     // store records
-    tracing::debug!("write records to record database...");
+    // tracing::debug!("write records to record database...");
     let records_dir = repo.records_dir().await.map_err(WsvcError::FsError)?;
     for record_with_state in &wanted_records {
         write(
@@ -359,19 +359,27 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     Ok(())
 }
 
-pub async fn clone(_url: String, _dir: Option<String>) -> Result<(), WsvcError> {
-    let repo_path = match _dir {
-        Some(p) => PathBuf::from(p),
-        None => std::env::current_dir().map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?,
+pub async fn clone(url: String, dir: Option<String>) -> Result<(), WsvcError> {
+    let pwd = std::env::current_dir().map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+    let repo_path = match dir {
+        Some(p) => pwd.join(p),
+        None => pwd.join(url.split('/').last().unwrap()),
     };
-    let repo = Repository::new(repo_path, false)
+    let repo = Repository::new(&repo_path, false)
         .await
         .map_err(|err| WsvcError::FsError(err))?;
     let guard = RepoGuard::new(&repo)
         .await
         .map_err(|err| WsvcError::FsError(err))?;
-    repo.write_origin(_url).await?;
+    repo.write_origin(url).await?;
     sync_impl(&repo).await?;
+    let latest_record = repo
+        .get_latest_record()
+        .await
+        .map_err(|err| WsvcError::FsError(err))?
+        .ok_or(WsvcError::EmptyRepoError)?;
+    repo.checkout_record(&latest_record.hash, &repo_path)
+        .await?;
     drop(guard);
     Ok(())
 }

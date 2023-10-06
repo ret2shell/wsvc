@@ -28,6 +28,7 @@ pub enum WsvcError {
     NeedConfiguring(String),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
+    #[cfg(feature = "cli")]
     #[error("network error: {0}")]
     NetworkError(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("data error: {0}")]
