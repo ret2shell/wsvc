@@ -1,6 +1,6 @@
 [package]
 name = "wsvc"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Reverier-Xu <reverier.xu@woooo.tech>"]
 description = "WebSocket Simple Version Control tool."
@@ -17,7 +17,7 @@ required-features = ["cli"]
 
 [dependencies]
 
-tokio = { version = "1.32", features = ["full"] }
+tokio = { version = "1.33", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = "0.1"
 bytes = "1.5"
