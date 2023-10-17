@@ -159,7 +159,7 @@ async fn store_tree_file_impl(
     for tree in tree.trees {
         result
             .trees
-            .push(store_tree_file_impl(tree, trees_dir.clone()).await?.0.hash);
+            .push(store_tree_file_impl(tree, trees_dir).await?.0.hash);
     }
     let hash = blake3::hash(serde_json::to_vec(&result)?.as_slice());
     result.hash = ObjectId(hash);
@@ -191,7 +191,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
         trees: vec![],
         blobs: vec![],
     };
-    let mut entries = read_dir(work_dir.clone()).await?;
+    let mut entries = read_dir(work_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let entry_type = entry.file_type().await?;
         if entry_type.is_dir() {
@@ -200,7 +200,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
             }
             result
                 .trees
-                .push(build_tree(root.clone(), &entry.path()).await?);
+                .push(build_tree(root, &entry.path()).await?);
         } else if entry_type.is_file() {
             result.blobs.push(
                 Blob {
@@ -661,14 +661,14 @@ impl Repository {
         // write remote repo url to ORIGIN
         write(self.path.join("ORIGIN"), url)
             .await
-            .map_err(|err| WsvcFsError::Os(err))
+            .map_err(WsvcFsError::Os)
     }
 
     pub async fn read_origin(&self) -> Result<String, WsvcFsError> {
         // read remote repo url from ORIGIN
         tokio::fs::read_to_string(self.path.join("ORIGIN"))
             .await
-            .map_err(|err| WsvcFsError::Os(err))
+            .map_err(WsvcFsError::Os)
     }
 }
 

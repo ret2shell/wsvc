@@ -140,7 +140,7 @@ async fn recv_file(
             "invalid file name header: {}",
             "none"
         )))?
-        .map_err(|err| WsvcServerError::NetworkError(err))?;
+        .map_err(WsvcServerError::NetworkError)?;
     let mut file_name_header_buf = [0u8; 4];
     if let AxumMessage::Binary(msg) = file_name_header {
         file_name_header_buf.copy_from_slice(&msg[..4]);
@@ -165,7 +165,7 @@ async fn recv_file(
             "invalid file name: {}",
             "none"
         )))?
-        .map_err(|err| WsvcServerError::NetworkError(err))?;
+        .map_err(WsvcServerError::NetworkError)?;
     let file_name = if let AxumMessage::Binary(msg) = file_name {
         String::from_utf8(msg[..file_name_size].to_vec())
             .map_err(|err| WsvcServerError::DataError(err.to_string()))?
@@ -180,7 +180,7 @@ async fn recv_file(
         .recv()
         .await
         .ok_or(WsvcServerError::DataError("invalid file header".to_owned()))?
-        .map_err(|err| WsvcServerError::NetworkError(err))?;
+        .map_err(WsvcServerError::NetworkError)?;
     let mut file_header_buf = [0u8; 6];
     if let AxumMessage::Binary(msg) = file_header {
         file_header_buf.copy_from_slice(&msg[..6]);
@@ -203,7 +203,7 @@ async fn recv_file(
             .recv()
             .await
             .ok_or(WsvcServerError::DataError("invalid file data".to_owned()))?
-            .map_err(|err| WsvcServerError::NetworkError(err))?;
+            .map_err(WsvcServerError::NetworkError)?;
         if let AxumMessage::Binary(data) = data {
             offset += data.len();
             file.write(&data)
@@ -223,14 +223,14 @@ async fn recv_file(
 ///
 /// * `repo` - repository to sync with.
 /// * `ws` - websocket connection from axum.
-pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), WsvcServerError> {
+pub async fn sync_with(repo: Repository, ws: &mut WebSocket) -> Result<(), WsvcServerError> {
     // packet header: 0x33 0x07 [size]
     // the first round for server, pack all record and send it to client
     let records = repo.get_records().await.map_err(WsvcError::FsError)?;
     let packet_body = serde_json::to_string(&records)?;
     tracing::debug!("send records: {:?}", records);
-    send_data(&mut ws, packet_body.into_bytes()).await?;
-    let diff_records = recv_data(&mut ws).await?;
+    send_data(ws, packet_body.into_bytes()).await?;
+    let diff_records = recv_data(ws).await?;
     tracing::debug!("recv diff records: {:?}", diff_records);
     let diff_records: Vec<RecordWithState> = serde_json::from_slice(&diff_records)?;
     let client_wanted_records = diff_records
@@ -257,14 +257,14 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
     }
     let packet_body = serde_json::to_string(&trees)?;
     tracing::debug!("send trees: {:?}", trees);
-    send_data(&mut ws, packet_body.into_bytes()).await?;
+    send_data(ws, packet_body.into_bytes()).await?;
 
     // now client have the complete trees list.
     // in round three, server should send all blobs to client which are required.
-    let new_trees = recv_data(&mut ws).await?;
+    let new_trees = recv_data(ws).await?;
     tracing::debug!("recv new trees: {:?}", new_trees);
     let new_trees: Vec<Tree> = serde_json::from_slice(&new_trees)?;
-    let diff_blobs = recv_data(&mut ws).await?;
+    let diff_blobs = recv_data(ws).await?;
     tracing::debug!("recv diff blobs: {:?}", diff_blobs);
     let diff_blobs: Vec<BlobWithState> = serde_json::from_slice(&diff_blobs)?;
     let client_wanted_blobs = diff_blobs
@@ -289,7 +289,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
             .await
             .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
         tracing::debug!("sending blob file: {:?}", blob.hash);
-        send_file(&mut ws, &blob.hash.0.to_hex().as_str(), file).await?;
+        send_file(ws, blob.hash.0.to_hex().as_str(), file).await?;
     }
     let temp_dir = repo.temp_dir().await.map_err(WsvcError::FsError)?;
     create_dir_all(temp_dir.join("objects"))
@@ -298,7 +298,7 @@ pub async fn sync_with(repo: Repository, mut ws: &mut WebSocket) -> Result<(), W
     let mut blob_count = client_will_given_blobs.len();
     let dir = temp_dir.join("objects");
     while blob_count > 0 {
-        recv_file(&mut ws, &dir).await?;
+        recv_file(ws, &dir).await?;
         blob_count -= 1;
     }
 

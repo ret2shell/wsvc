@@ -112,7 +112,7 @@ async fn recv_file(
             "invalid file name header: {}",
             "none"
         )))?
-        .map_err(|err| WsvcError::NetworkError(err))?;
+        .map_err(WsvcError::NetworkError)?;
     let mut file_name_header_buf = [0u8; 4];
     if let tungstenite::Message::Binary(msg) = file_name_header {
         file_name_header_buf.copy_from_slice(&msg[..4]);
@@ -137,7 +137,7 @@ async fn recv_file(
             "invalid file name: {}",
             "none"
         )))?
-        .map_err(|err| WsvcError::NetworkError(err))?;
+        .map_err(WsvcError::NetworkError)?;
     let file_name = if let tungstenite::Message::Binary(msg) = file_name {
         String::from_utf8(msg[..file_name_size].to_vec())
             .map_err(|err| WsvcError::DataError(err.to_string()))?
@@ -152,7 +152,7 @@ async fn recv_file(
         .next()
         .await
         .ok_or(WsvcError::DataError("invalid file header".to_owned()))?
-        .map_err(|err| WsvcError::NetworkError(err))?;
+        .map_err(WsvcError::NetworkError)?;
     let mut file_header_buf = [0u8; 6];
     if let tungstenite::Message::Binary(msg) = file_header {
         file_header_buf.copy_from_slice(&msg[..6]);
@@ -175,7 +175,7 @@ async fn recv_file(
             .next()
             .await
             .ok_or(WsvcError::DataError("invalid file data".to_owned()))?
-            .map_err(|err| WsvcError::NetworkError(err))?;
+            .map_err(WsvcError::NetworkError)?;
         if let tungstenite::Message::Binary(data) = data {
             offset += data.len();
             file.write(&data)
@@ -199,7 +199,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
     let local_records = repo
         .get_records()
         .await
-        .map_err(|err| WsvcError::FsError(err))?;
+        .map_err(WsvcError::FsError)?;
     let wanted_records = remote_records
         .iter()
         .filter(|r| !local_records.contains(r))
@@ -296,7 +296,7 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         // tracing::debug!("sending blob file: {:?}", blob_with_state.blob.hash);
         send_file(
             &mut ws,
-            &blob_with_state.blob.hash.0.to_hex().as_str(),
+            blob_with_state.blob.hash.0.to_hex().as_str(),
             file,
         )
         .await?;
@@ -367,16 +367,16 @@ pub async fn clone(url: String, dir: Option<String>) -> Result<(), WsvcError> {
     };
     let repo = Repository::new(&repo_path, false)
         .await
-        .map_err(|err| WsvcError::FsError(err))?;
+        .map_err(WsvcError::FsError)?;
     let guard = RepoGuard::new(&repo)
         .await
-        .map_err(|err| WsvcError::FsError(err))?;
+        .map_err(WsvcError::FsError)?;
     repo.write_origin(url).await?;
     sync_impl(&repo).await?;
     let latest_record = repo
         .get_latest_record()
         .await
-        .map_err(|err| WsvcError::FsError(err))?
+        .map_err(WsvcError::FsError)?
         .ok_or(WsvcError::EmptyRepoError)?;
     repo.checkout_record(&latest_record.hash, &repo_path)
         .await?;
@@ -388,17 +388,17 @@ pub async fn sync() -> Result<(), WsvcError> {
     let pwd = std::env::current_dir().map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     let repo = Repository::try_open(&pwd)
         .await
-        .map_err(|err| WsvcError::FsError(err))?;
+        .map_err(WsvcError::FsError)?;
     let guard = RepoGuard::new(&repo)
         .await
-        .map_err(|err| WsvcError::FsError(err))?;
+        .map_err(WsvcError::FsError)?;
     sync_impl(&repo).await?;
     let latest_record = repo
         .get_latest_record()
         .await
-        .map_err(|err| WsvcError::FsError(err))?
+        .map_err(WsvcError::FsError)?
         .ok_or(WsvcError::EmptyRepoError)?;
-    repo.checkout_record(&latest_record.hash, &pwd.as_path())
+    repo.checkout_record(&latest_record.hash, pwd.as_path())
         .await?;
     drop(guard);
     Ok(())

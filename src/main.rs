@@ -9,7 +9,7 @@ async fn main() {
     match cli::run().await {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}: {}", "error".bright_red().bold(), e.to_string());
+            eprintln!("{}: {}", "error".bright_red().bold(), e);
             std::process::exit(-1);
         }
     }
