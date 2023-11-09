@@ -40,6 +40,12 @@ impl From<blake3::Hash> for ObjectId {
     }
 }
 
+impl Into<String> for ObjectId {
+    fn into(self) -> String {
+        self.0.to_string()
+    }
+}
+
 impl TryFrom<String> for ObjectId {
     type Error = blake3::HexError;
 
@@ -58,14 +64,14 @@ impl TryFrom<&str> for ObjectId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 /// `Blob` stand for an object.
 pub struct Blob {
     pub name: String,
     pub hash: ObjectId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 /// `Tree` stand for a dir.
 pub struct Tree {
     pub name: String,

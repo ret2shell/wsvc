@@ -1,17 +1,41 @@
 use std::path::Path;
 
+use colored::Colorize;
 use futures::{SinkExt, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
 use tokio::{
-    fs::{create_dir_all, read_dir, rename, write, File},
+    fs::{create_dir_all, rename, write, File},
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 use tokio_tungstenite::{self, tungstenite, MaybeTlsStream, WebSocketStream};
 use wsvc::{
     fs::{RepoGuard, WsvcFsError},
-    model::{Record, Repository, Tree},
-    server, WsvcError,
+    model::{Blob, Record, Repository, Tree},
+    WsvcError,
 };
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecordWithState {
+    pub record: Record,
+    /// 0: same, 1: wanted, 2: will-give
+    pub state: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TreeWithState {
+    pub tree: Tree,
+    /// 0: same, 1: wanted, 2: will-give
+    pub state: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BlobWithState {
+    pub blob: Blob,
+    /// 0: same, 1: wanted, 2: will-give
+    pub state: i32,
+}
 
 async fn send_data(
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -189,150 +213,294 @@ async fn recv_file(
     Ok(())
 }
 
-async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
-    let origin = repo.read_origin().await?;
-    // the first round for client, receive server's all records
-    let (mut ws, _) = tokio_tungstenite::connect_async(origin).await?;
-    let packet_body = recv_data(&mut ws).await?;
-    let remote_records: Vec<Record> = serde_json::from_slice(&packet_body)?;
-    // tracing::debug!("recv records: {:?}", remote_records);
-    let local_records = repo
-        .get_records()
-        .await
-        .map_err(WsvcError::FsError)?;
-    let wanted_records = remote_records
+async fn sync_records(
+    repo: &Repository,
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> Result<(Vec<Record>, Vec<Record>), WsvcError> {
+    println!("{} {}", "[+]".bright_green(), "Sync records...".bold());
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.bold.green}    {wide_msg}")
+            .unwrap()
+            .tick_chars("* "),
+    );
+    pb.set_message("Receiving server records...");
+    let server_records = recv_data(ws).await?;
+    let server_records: Vec<Record> = serde_json::from_slice(&server_records)?;
+    pb.set_message("Counting local records...");
+    let local_records = repo.get_records().await?;
+    pb.set_message("Differing records...");
+    let wanted_records = server_records
         .iter()
         .filter(|r| !local_records.contains(r))
-        .map(|r| server::RecordWithState {
+        .cloned()
+        .collect::<Vec<_>>();
+    let will_give_records = local_records
+        .iter()
+        .filter(|r| !server_records.contains(r))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut response_records: Vec<RecordWithState> = wanted_records
+        .iter()
+        .map(|r| RecordWithState {
             record: r.clone(),
             state: 1,
         })
-        .collect::<Vec<_>>();
-    let will_given_records = local_records
-        .iter()
-        .filter(|r| !remote_records.contains(r))
-        .map(|r| server::RecordWithState {
-            record: r.clone(),
-            state: 2,
-        })
-        .collect::<Vec<_>>();
-    let mut diff_records = Vec::with_capacity(wanted_records.len() + will_given_records.len());
-    diff_records.extend_from_slice(&wanted_records);
-    diff_records.extend_from_slice(&will_given_records);
-    let packet_body = serde_json::to_string(&diff_records)?;
-    send_data(&mut ws, packet_body.into_bytes()).await?;
+        .collect();
+    response_records.extend_from_slice(
+        &will_give_records
+            .iter()
+            .map(|r| RecordWithState {
+                record: r.clone(),
+                state: 2,
+            })
+            .collect::<Vec<RecordWithState>>(),
+    );
+    pb.set_message("Sending diff records...");
+    let packet_body = serde_json::to_string(&response_records)?;
+    send_data(ws, packet_body.into_bytes()).await?;
+    pb.finish_and_clear();
+    Ok((wanted_records, will_give_records))
+}
 
-    // the second round for client, sync trees
-    let packet_body = recv_data(&mut ws).await?;
-    let wanted_trees: Vec<Tree> = serde_json::from_slice(&packet_body)?;
-    // tracing::debug!("recv trees: {:?}", wanted_trees);
-    let mut will_given_trees = Vec::new();
-    for record_with_state in &wanted_records {
-        will_given_trees.extend_from_slice(
+async fn sync_trees(
+    repo: &Repository,
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    given_records: &[Record],
+) -> Result<(Vec<Tree>, Vec<Tree>), WsvcError> {
+    println!("{} {}", "[+]".bright_green(), "Sync trees...".bold());
+    let tick_style = ProgressStyle::with_template("{spinner:.bold.green}    {wide_msg}")
+        .unwrap()
+        .tick_chars("* ");
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(tick_style.clone());
+    pb.set_message("Receiving server trees...");
+    let server_trees = recv_data(ws).await?;
+    pb.set_message(format!(
+        "Counting local trees for record... (0/{})",
+        given_records.len()
+    ));
+    let server_trees: Vec<Tree> = serde_json::from_slice(&server_trees)?;
+    let mut local_trees: Vec<Tree> = Vec::new();
+    let mut i = 0;
+    for record in given_records.iter() {
+        i += 1;
+        pb.set_message(format!(
+            "Counting local trees for record... ({i}/{})",
+            given_records.len()
+        ));
+        local_trees.extend_from_slice(
             &repo
-                .get_trees_of_record(&record_with_state.record.hash)
+                .get_trees_of_record(&record.hash)
                 .await
                 .map_err(WsvcError::FsError)?,
         );
     }
-    let packet_body = serde_json::to_string(&will_given_trees)?;
-    send_data(&mut ws, packet_body.into_bytes()).await?;
-    // tracing::debug!("send trees: {:?}", will_given_trees);
-
-    // the third round for client, sync blobs
-    let mut wanted_blobs = Vec::new();
-    for tree in &wanted_trees {
-        wanted_blobs.extend_from_slice(
-            &(tree
-                .blobs
-                .iter()
-                .map(|b| server::BlobWithState {
-                    blob: b.clone(),
-                    state: 1,
-                })
-                .collect::<Vec<_>>()),
-        )
-    }
-    let mut will_given_blobs = Vec::new();
-    for tree in &will_given_trees {
-        will_given_blobs.extend_from_slice(
-            &(tree
-                .blobs
-                .iter()
-                .map(|b| server::BlobWithState {
-                    blob: b.clone(),
-                    state: 2,
-                })
-                .collect::<Vec<_>>()),
-        )
-    }
-    let mut diff_blobs = Vec::with_capacity(wanted_blobs.len() + will_given_blobs.len());
-    diff_blobs.extend_from_slice(&wanted_blobs);
-    diff_blobs.extend_from_slice(&will_given_blobs);
-    // tracing::debug!("send diff blobs: {:?}", diff_blobs);
-    let packet_body = serde_json::to_vec(&diff_blobs)?;
-    send_data(&mut ws, packet_body).await?;
-
-    let temp_dir = repo.temp_dir().await.map_err(WsvcError::FsError)?;
-    create_dir_all(temp_dir.join("objects"))
-        .await
-        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-    let mut blob_count = wanted_blobs.len();
-    let dir = temp_dir.join("objects");
-    while blob_count > 0 {
-        recv_file(&mut ws, &dir).await?;
-        blob_count -= 1;
-    }
-
-    for blob_with_state in will_given_blobs {
-        let blob_path = repo
-            .objects_dir()
-            .await
-            .map_err(WsvcError::FsError)?
-            .join(blob_with_state.blob.hash.0.to_hex().as_str());
-        let file = File::open(blob_path)
-            .await
-            .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-        // tracing::debug!("sending blob file: {:?}", blob_with_state.blob.hash);
-        send_file(
-            &mut ws,
-            blob_with_state.blob.hash.0.to_hex().as_str(),
-            file,
-        )
-        .await?;
-    }
-    for blob_with_state in &wanted_blobs {
-        // tracing::debug!("checking blob file: {:?}", blob_with_state.blob);
-        if !blob_with_state
-            .blob
-            .checksum(&dir.join(blob_with_state.blob.hash.0.to_hex().as_str()))
-            .await
-            .map_err(WsvcError::FsError)?
-        {
-            return Err(WsvcError::DataError(format!(
-                "blob {} checksum failed",
-                blob_with_state.blob.hash.0.to_hex().as_str()
-            )));
+    pb.set_message("Differing trees...");
+    let mut wanted_trees = Vec::new();
+    for tree in &server_trees {
+        if !repo.tree_exists(&tree.hash).await? {
+            wanted_trees.push(tree.clone());
         }
     }
+    let mut will_give_trees = Vec::new();
+    for tree in local_trees {
+        if !server_trees.contains(&tree) {
+            will_give_trees.push(tree);
+        }
+    }
+    let mut response_trees: Vec<TreeWithState> = wanted_trees
+        .iter()
+        .map(|t| TreeWithState {
+            tree: t.clone(),
+            state: 1,
+        })
+        .collect();
+    response_trees.extend_from_slice(
+        &will_give_trees
+            .iter()
+            .map(|t| TreeWithState {
+                tree: t.clone(),
+                state: 2,
+            })
+            .collect::<Vec<TreeWithState>>(),
+    );
+    pb.set_message("Sending diff trees...");
+    let packet_body = serde_json::to_string(&response_trees)?;
+    send_data(ws, packet_body.into_bytes()).await?;
+    pb.finish_and_clear();
+    Ok((wanted_trees, will_give_trees))
+}
 
-    // tracing::debug!("moving blob files to object database...");
-    let objects_dir = repo.objects_dir().await.map_err(WsvcError::FsError)?;
-    let mut entries = read_dir(&dir)
-        .await
-        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?
-    {
-        rename(entry.path(), objects_dir.join(entry.file_name()))
+async fn sync_blobs_meta(
+    repo: &Repository,
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    given_trees: &[Tree],
+) -> Result<(Vec<Blob>, Vec<Blob>), WsvcError> {
+    println!("{} {}", "[+]".bright_green(), "Sync blobs meta...".bold());
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.bold.green}    {wide_msg}")
+            .unwrap()
+            .tick_chars("* "),
+    );
+    pb.set_message("Receiving server blobs...");
+    let server_blobs = recv_data(ws).await?;
+    let server_blobs: Vec<Blob> = serde_json::from_slice(&server_blobs)?;
+    pb.set_message(format!(
+        "Counting local blobs for tree... (0/{})",
+        given_trees.len()
+    ));
+    let mut i = 0;
+    let mut local_blobs: Vec<Blob> = Vec::new();
+    for tree in given_trees.iter() {
+        i += 1;
+        pb.set_message(format!(
+            "Counting local blobs for tree... ({i}/{})",
+            given_trees.len()
+        ));
+        local_blobs.extend_from_slice(
+            &repo
+                .get_blobs_of_tree(&tree.hash)
+                .await
+                .map_err(WsvcError::FsError)?,
+        );
+    }
+    pb.set_message("Differing blobs...");
+    let mut wanted_blobs = Vec::new();
+    for blob in &server_blobs {
+        if !repo.blob_exists(&blob.hash).await? {
+            wanted_blobs.push(blob.clone());
+        }
+    }
+    let mut will_give_blobs = Vec::new();
+    for blob in local_blobs {
+        if !server_blobs.contains(&blob) {
+            will_give_blobs.push(blob);
+        }
+    }
+    let mut response_blobs: Vec<BlobWithState> = wanted_blobs
+        .iter()
+        .map(|b| BlobWithState {
+            blob: b.clone(),
+            state: 1,
+        })
+        .collect();
+    response_blobs.extend_from_slice(
+        &will_give_blobs
+            .iter()
+            .map(|b| BlobWithState {
+                blob: b.clone(),
+                state: 2,
+            })
+            .collect::<Vec<BlobWithState>>(),
+    );
+    pb.set_message("Sending diff blobs...");
+    let packet_body = serde_json::to_string(&response_blobs)?;
+    send_data(ws, packet_body.into_bytes()).await?;
+    pb.finish_and_clear();
+    Ok((wanted_blobs, will_give_blobs))
+}
+
+async fn sync_blobs(
+    repo: &Repository,
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    wanted_blobs: &[Blob],
+    will_given_blobs: &[Blob],
+) -> Result<(), WsvcError> {
+    println!("{} {}", "[+]".bright_green(), "Sync blobs...".bold());
+    let pb = ProgressBar::new(wanted_blobs.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.yellow} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("=>."),
+    );
+    let objects_dir = repo.objects_dir().await?;
+    let temp_objects_dir = repo.temp_dir().await?.join("objects");
+    if !temp_objects_dir.exists() {
+        create_dir_all(&temp_objects_dir)
             .await
             .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
+    pb.set_message("Receiving...");
+    pb.set_position(0);
+    for _ in 0..wanted_blobs.len() {
+        recv_file(ws, &temp_objects_dir).await?;
+        pb.inc(1);
+    }
+    pb.set_message("Verifing...");
+    pb.set_position(0);
+    for i in wanted_blobs {
+        let object_file = temp_objects_dir.join(i.hash.0.to_string());
+        if !object_file.exists() {
+            return Err(WsvcError::DataError(format!(
+                "blob {} not synced from remote",
+                i.hash.0.to_string()
+            )));
+        }
+        pb.inc(1);
+    }
+    pb.finish_with_message("Done.");
+    let pb = ProgressBar::new(will_given_blobs.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.blue} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("=>."),
+    );
+    pb.set_message("Sending...");
+    pb.set_position(0);
+    for blob in will_given_blobs {
+        let object_file = objects_dir.join(blob.hash.0.to_string());
+        let file = File::open(object_file)
+            .await
+            .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+        send_file(ws, &blob.hash.0.to_string(), file).await?;
+        pb.inc(1);
+    }
+    pb.finish_with_message("Done.");
+    let pb = ProgressBar::new(wanted_blobs.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.green} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("=>."),
+    );
+    pb.set_message("Moving...");
+    for i in wanted_blobs {
+        rename(
+            temp_objects_dir.join(i.hash.0.to_string()),
+            objects_dir.join(i.hash.0.to_string()),
+        )
+        .await
+        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+        pb.inc(1);
+    }
+    pb.finish_with_message("Done.");
+    Ok(())
+}
 
-    // store trees
-    // tracing::debug!("write trees to tree database...");
+async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
+    let origin = repo.read_origin().await?;
+    // the first round for client, receive server's all records
+    println!(
+        "{} {}",
+        "[+]".bright_green(),
+        "Connecting to remote server...".bold()
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(origin).await?;
+    let (wanted_records, given_records) = sync_records(repo, &mut ws).await?;
+    let (wanted_trees, given_trees) = sync_trees(repo, &mut ws, given_records.as_slice()).await?;
+    let (wanted_blobs, given_blobs) =
+        sync_blobs_meta(repo, &mut ws, given_trees.as_slice()).await?;
+    sync_blobs(
+        repo,
+        &mut ws,
+        wanted_blobs.as_slice(),
+        given_blobs.as_slice(),
+    )
+    .await?;
     let trees_dir = repo.trees_dir().await.map_err(WsvcError::FsError)?;
     for tree in &wanted_trees {
         write(
@@ -343,18 +511,20 @@ async fn sync_impl(repo: &Repository) -> Result<(), WsvcError> {
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
-
-    // store records
-    // tracing::debug!("write records to record database...");
     let records_dir = repo.records_dir().await.map_err(WsvcError::FsError)?;
-    for record_with_state in &wanted_records {
+    println!("{} {}", "[*]".bright_blue(), "Summary:".bold());
+    for record in &wanted_records {
+        println!("  {} ({}) {}", "<<".bright_yellow(), record.hash.0.to_string()[0..6].dimmed().bold(), record.message);
         write(
-            records_dir.join(record_with_state.record.hash.0.to_hex().as_str()),
-            serde_json::to_string(&record_with_state.record)
+            records_dir.join(record.hash.0.to_hex().as_str()),
+            serde_json::to_string(record)
                 .map_err(|err| WsvcError::FsError(WsvcFsError::SerializationFailed(err)))?,
         )
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+    }
+    for record in &given_records {
+        println!("  {} ({}) {}", ">>".bright_blue(), record.hash.0.to_string()[0..6].dimmed().bold(), record.message);
     }
     Ok(())
 }
@@ -368,9 +538,7 @@ pub async fn clone(url: String, dir: Option<String>) -> Result<(), WsvcError> {
     let repo = Repository::new(&repo_path, false)
         .await
         .map_err(WsvcError::FsError)?;
-    let guard = RepoGuard::new(&repo)
-        .await
-        .map_err(WsvcError::FsError)?;
+    let guard = RepoGuard::new(&repo).await.map_err(WsvcError::FsError)?;
     repo.write_origin(url).await?;
     sync_impl(&repo).await?;
     let latest_record = repo
@@ -389,9 +557,7 @@ pub async fn sync() -> Result<(), WsvcError> {
     let repo = Repository::try_open(&pwd)
         .await
         .map_err(WsvcError::FsError)?;
-    let guard = RepoGuard::new(&repo)
-        .await
-        .map_err(WsvcError::FsError)?;
+    let guard = RepoGuard::new(&repo).await.map_err(WsvcError::FsError)?;
     sync_impl(&repo).await?;
     let latest_record = repo
         .get_latest_record()

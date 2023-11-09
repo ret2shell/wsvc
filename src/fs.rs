@@ -28,6 +28,10 @@ impl RepoGuard {
 impl Drop for RepoGuard {
     fn drop(&mut self) {
         let repo = self.repo.clone();
+        let temp_dir = self.repo.path.join("temp");
+        if temp_dir.exists() {
+          std::fs::remove_dir_all(temp_dir).ok();
+        }
         repo.unlock().ok();
     }
 }
@@ -400,6 +404,14 @@ impl Repository {
         .await
     }
 
+    pub async fn blob_exists(&self, blob_hash: &ObjectId) -> Result<bool, WsvcFsError> {
+        Ok(self
+            .objects_dir()
+            .await?
+            .join(blob_hash.0.to_hex().as_str())
+            .exists())
+    }
+
     /// read blob data from objects database.
     pub async fn read_blob(&self, blob_hash: &ObjectId) -> Result<Vec<u8>, WsvcFsError> {
         let blob_path = self
@@ -441,6 +453,10 @@ impl Repository {
         let stored_tree = build_tree(&self.path, workspace.as_ref()).await?;
         let result = store_tree_file_impl(stored_tree, &self.trees_dir().await?).await?;
         Ok(result)
+    }
+
+    pub async fn tree_exists(&self, tree_hash: &ObjectId) -> Result<bool, WsvcFsError> {
+        Ok(self.trees_dir().await?.join(tree_hash.0.to_hex().as_str()).exists())
     }
 
     /// read a tree object from trees dir
@@ -621,6 +637,23 @@ impl Repository {
         while let Some(tree_hash) = queue.pop() {
             let tree = self.read_tree(&tree_hash).await?;
             result.push(tree.clone());
+            for tree_hash in tree.trees {
+                queue.push(tree_hash);
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn get_blobs_of_tree(
+        &self,
+        tree_hash: &ObjectId,
+    ) -> Result<Vec<Blob>, WsvcFsError> {
+        let tree = self.read_tree(tree_hash).await?;
+        let mut result = tree.blobs.clone();
+        let mut queue = tree.trees;
+        while let Some(tree_hash) = queue.pop() {
+            let tree = self.read_tree(&tree_hash).await?;
+            result.extend(tree.blobs.clone());
             for tree_hash in tree.trees {
                 queue.push(tree_hash);
             }

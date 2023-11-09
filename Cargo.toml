@@ -1,6 +1,6 @@
 [package]
 name = "wsvc"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 authors = ["Reverier-Xu <reverier.xu@woooo.tech>"]
 description = "WebSocket Simple Version Control tool."
@@ -43,6 +43,8 @@ once_cell = { version = "1.18", optional = true }
 clap = { version = "4.4", features = ["derive"], optional = true }
 colored = { version = "2.0", optional = true }
 dirs = { version = "5.0", optional = true }
+merge ={ version = "0.1", optional = true }
+indicatif = { version = "0.17", optional = true, features = ["tokio"]}
 
 # server dependencies
 axum = { version = "0.6", features = [
@@ -71,6 +73,8 @@ cli = [
     "dep:tokio-tungstenite",
     "dep:colored",
     "dep:dirs",
+    "dep:merge",
+    "dep:indicatif",
 ]
 server = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:tracing"]
 all = ["cli", "server"]

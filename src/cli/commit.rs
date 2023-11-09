@@ -7,11 +7,9 @@ use wsvc::{
     WsvcError,
 };
 
-use super::config::get_config;
-
 pub async fn commit(
     message: String,
-    author: Option<String>,
+    author: String,
     workspace: Option<String>,
     root: Option<String>,
 ) -> Result<(), WsvcError> {
@@ -29,30 +27,7 @@ pub async fn commit(
             "workspace and repo path can not be the same".to_owned(),
         ));
     }
-    let record = repo
-        .commit_record(
-            &workspace,
-            &author.unwrap_or(
-                get_config()
-                    .await?
-                    .ok_or(WsvcError::LackOfConfig(
-                        "commit.author".to_owned(),
-                        "wsvc config set commit.author [--global]".to_owned(),
-                    ))?
-                    .commit
-                    .ok_or(WsvcError::LackOfConfig(
-                        "commit.author".to_owned(),
-                        "wsvc config set commit.author [--global]".to_owned(),
-                    ))?
-                    .author
-                    .ok_or(WsvcError::LackOfConfig(
-                        "commit.author".to_owned(),
-                        "wsvc config set commit.author [--global]".to_owned(),
-                    ))?,
-            ),
-            &message,
-        )
-        .await?;
+    let record = repo.commit_record(&workspace, &author, &message).await?;
     let hash = record.hash.0.to_hex().to_string();
     println!("Committed record: {} ({})", hash[0..6].green().bold(), hash);
     drop(guard);

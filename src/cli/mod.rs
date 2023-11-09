@@ -3,7 +3,6 @@ use wsvc::WsvcError;
 
 mod checkout;
 mod commit;
-mod config;
 mod create;
 mod logs;
 mod transport;
@@ -21,7 +20,7 @@ enum WsvcCli {
         message: String,
         /// commit author
         #[clap(short, long)]
-        author: Option<String>,
+        author: String,
         /// optional workspace dir, if not configured, current dir will be used
         #[clap(short, long)]
         workspace: Option<String>,
@@ -78,11 +77,6 @@ enum WsvcCli {
     },
     /// sync a repository with remote origin
     Sync,
-    /// manage global/repository config
-    Config {
-        #[clap(subcommand)]
-        subcmd: ConfigSubCmd,
-    },
 }
 
 #[derive(Parser)]
@@ -131,14 +125,5 @@ pub async fn run() -> Result<(), WsvcError> {
         WsvcCli::Logs { root, skip, limit } => logs::logs(root, skip, limit).await,
         WsvcCli::Clone { url, dir } => transport::clone(url, dir).await,
         WsvcCli::Sync => transport::sync().await,
-        WsvcCli::Config { subcmd } => match subcmd {
-            ConfigSubCmd::Get { key } => config::get(key).await,
-            ConfigSubCmd::Set { key, value, global } => {
-                config::set(key, value, global.unwrap_or(false)).await
-            }
-            ConfigSubCmd::Unset { key, global } => {
-                config::unset(key, global.unwrap_or(false)).await
-            }
-        },
     }
 }

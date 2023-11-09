@@ -22,7 +22,7 @@ pub async fn logs(
     let head_hash = head_record.map(|r| r.hash).unwrap_or_default();
     let latest_hash = latest_record.map(|r| r.hash).unwrap_or_default();
     for record in records.iter().skip(skip).take(limit) {
-        let hash_str = record.hash.0.to_hex().to_ascii_lowercase();
+        let hash_str = record.hash.0.to_string();
         let cursor = if head_hash == record.hash || latest_hash == record.hash {
             format!(
                 "<== {}{}",

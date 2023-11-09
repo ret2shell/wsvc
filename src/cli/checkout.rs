@@ -7,8 +7,6 @@ use wsvc::{
     WsvcError,
 };
 
-use super::config::{get_config, Commit};
-
 pub async fn checkout(
     hash: Option<String>,
     workspace: Option<String>,
@@ -28,39 +26,23 @@ pub async fn checkout(
             "workspace and repo path can not be the same".to_owned(),
         ));
     }
-    let config = get_config().await?;
-    let tips = "wsvc can't keep current workspace changes when you checkout to record.\n\ntips: you must `wsvc config set commit.auto_record [true/false]` to determine whether auto commit changes when checkout, if it set to false, unsaved changes will be abandoned.";
-    let mut auto_record = false;
-    let mut commit = Commit::default();
-    if let Some(config) = config {
-        config
-            .commit
-            .and_then(|commit| commit.auto_record.map(|a| (commit, a)))
-            .map(|(c, a)| {
-                auto_record = a;
-                commit = c;
-            })
-            .ok_or(WsvcError::NeedConfiguring(tips.to_owned()))?;
-    } else {
-        return Err(WsvcError::NeedConfiguring(tips.to_owned()));
-    }
-    if auto_record {
-        let record = repo
-            .commit_record(
-                &workspace,
-                format!("{} BACKUP", commit.author.unwrap_or("DEFAULT".to_owned())),
-                "auto backup by checkout",
-            )
-            .await
-            .ok();
-        if let Some(record) = record {
-            let hash = record.hash.0.to_hex().to_string();
-            println!(
-                "Auto-backup created a record: {} ({})",
-                hash[0..6].green().bold(),
-                hash
-            );
-        }
+    // let tips = "wsvc can't keep current workspace changes when you checkout to record.\n\ntips: you must `wsvc config set commit.auto_record [true/false]` to determine whether auto commit changes when checkout, if it set to false, unsaved changes will be abandoned.";
+
+    let record = repo
+        .commit_record(
+            &workspace,
+            "AUTO BACKUP".to_owned(),
+            "auto backup by checkout",
+        )
+        .await
+        .ok();
+    if let Some(record) = record {
+        let hash = record.hash.0.to_hex().to_string();
+        println!(
+            "Auto-backup created a record: {} ({})",
+            hash[0..6].green().bold(),
+            hash
+        );
     }
     if let Some(hash) = hash {
         let hash = hash.to_ascii_lowercase();

@@ -4,12 +4,12 @@ use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    fs::{create_dir_all, read_dir, rename, write, File},
+    fs::{create_dir_all, rename, write, File},
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
 use crate::{
-    fs::WsvcFsError,
+    fs::{RepoGuard, WsvcFsError},
     model::{Blob, Record, Repository, Tree},
     WsvcError,
 };
@@ -30,6 +30,13 @@ pub enum WsvcServerError {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RecordWithState {
     pub record: Record,
+    /// 0: same, 1: wanted, 2: will-give
+    pub state: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TreeWithState {
+    pub tree: Tree,
     /// 0: same, 1: wanted, 2: will-give
     pub state: i32,
 }
@@ -217,37 +224,46 @@ async fn recv_file(
     Ok(())
 }
 
-/// `sync_with` syncs repository with client.
+/// `sync_records` syncs records with client.
 ///
-/// ## arguments
-///
-/// * `repo` - repository to sync with.
-/// * `ws` - websocket connection from axum.
-pub async fn sync_with(repo: Repository, ws: &mut WebSocket) -> Result<(), WsvcServerError> {
+/// ## returns
+/// (wanted_records, will_given_records)
+async fn sync_records(
+    repo: &Repository,
+    ws: &mut WebSocket,
+) -> Result<(Vec<Record>, Vec<Record>), WsvcServerError> {
     // packet header: 0x33 0x07 [size]
     // the first round for server, pack all record and send it to client
+    tracing::debug!("ROUND 1: sync records...");
     let records = repo.get_records().await.map_err(WsvcError::FsError)?;
     let packet_body = serde_json::to_string(&records)?;
-    tracing::debug!("send records: {:?}", records);
+    tracing::trace!("send records: {:?}", records);
     send_data(ws, packet_body.into_bytes()).await?;
     let diff_records = recv_data(ws).await?;
-    tracing::debug!("recv diff records: {:?}", diff_records);
+    tracing::trace!("recv diff records: {:?}", diff_records);
     let diff_records: Vec<RecordWithState> = serde_json::from_slice(&diff_records)?;
-    let client_wanted_records = diff_records
+    let wanted_records = diff_records
         .iter()
         .filter(|r| r.state == 1)
         .map(|r| r.record.clone())
         .collect::<Vec<_>>();
     // do not store records until trees and blobs are synced.
-    let client_will_given_records = diff_records
+    let will_given_records = diff_records
         .iter()
         .filter(|r| r.state == 2)
         .map(|r| r.record.clone())
         .collect::<Vec<_>>();
+    Ok((wanted_records, will_given_records))
+}
 
-    // the second round for server, sync trees
+async fn sync_trees(
+    repo: &Repository,
+    ws: &mut WebSocket,
+    wanted_records: &[Record],
+) -> Result<(Vec<Tree>, Vec<Tree>), WsvcServerError> {
+    tracing::debug!("ROUND 2: sync trees...");
     let mut trees = Vec::new();
-    for record in &client_wanted_records {
+    for record in wanted_records {
         trees.extend_from_slice(
             &repo
                 .get_trees_of_record(&record.hash)
@@ -256,85 +272,150 @@ pub async fn sync_with(repo: Repository, ws: &mut WebSocket) -> Result<(), WsvcS
         );
     }
     let packet_body = serde_json::to_string(&trees)?;
-    tracing::debug!("send trees: {:?}", trees);
+    tracing::trace!("send trees: {:?}", trees);
     send_data(ws, packet_body.into_bytes()).await?;
+    let diff_trees = recv_data(ws).await?;
+    tracing::trace!("recv diff trees: {:?}", diff_trees);
+    let diff_trees: Vec<TreeWithState> = serde_json::from_slice(&diff_trees)?;
+    let wanted_trees = diff_trees
+        .iter()
+        .filter(|t| t.state == 1)
+        .map(|t| t.tree.clone())
+        .collect::<Vec<_>>();
+    let will_given_trees = diff_trees
+        .iter()
+        .filter(|t| t.state == 2)
+        .map(|t| t.tree.clone())
+        .collect::<Vec<_>>();
+    Ok((wanted_trees, will_given_trees))
+}
 
-    // now client have the complete trees list.
-    // in round three, server should send all blobs to client which are required.
-    let new_trees = recv_data(ws).await?;
-    tracing::debug!("recv new trees: {:?}", new_trees);
-    let new_trees: Vec<Tree> = serde_json::from_slice(&new_trees)?;
+async fn sync_blobs_meta(
+    repo: &Repository,
+    ws: &mut WebSocket,
+    wanted_trees: &[Tree],
+) -> Result<(Vec<Blob>, Vec<Blob>), WsvcServerError> {
+    tracing::debug!("ROUND 3: sync blobs meta...");
+    let mut blobs = Vec::new();
+    for tree in wanted_trees {
+        blobs.extend_from_slice(
+            &repo
+                .get_blobs_of_tree(&tree.hash)
+                .await
+                .map_err(WsvcError::FsError)?,
+        );
+    }
+    let packet_body = serde_json::to_string(&blobs)?;
+    tracing::trace!("send blobs meta: {:?}", blobs);
+    send_data(ws, packet_body.into_bytes()).await?;
     let diff_blobs = recv_data(ws).await?;
-    tracing::debug!("recv diff blobs: {:?}", diff_blobs);
+    tracing::trace!("recv diff blobs meta: {:?}", diff_blobs);
     let diff_blobs: Vec<BlobWithState> = serde_json::from_slice(&diff_blobs)?;
-    let client_wanted_blobs = diff_blobs
+    let wanted_blobs = diff_blobs
         .iter()
         .filter(|b| b.state == 1)
         .map(|b| b.blob.clone())
         .collect::<Vec<_>>();
-    let client_will_given_blobs = diff_blobs
+    let will_given_blobs = diff_blobs
         .iter()
         .filter(|b| b.state == 2)
         .map(|b| b.blob.clone())
         .collect::<Vec<_>>();
+    Ok((wanted_blobs, will_given_blobs))
+}
 
-    // the third round for server, sync blobs
-    for blob in client_wanted_blobs {
-        let blob_path = repo
-            .objects_dir()
-            .await
-            .map_err(WsvcError::FsError)?
-            .join(blob.hash.0.to_hex().as_str());
-        let file = File::open(blob_path)
+async fn sync_blobs(
+    repo: &Repository,
+    ws: &mut WebSocket,
+    wanted_blobs: &[Blob],
+    will_given_blobs: &[Blob],
+) -> Result<(), WsvcServerError> {
+    tracing::debug!("ROUND 4: sync blobs...");
+    let objects_dir = repo
+        .objects_dir()
+        .await
+        .map_err(|err| WsvcError::from(err))?;
+    let temp_objects_dir = repo
+        .temp_dir()
+        .await
+        .map_err(|err| WsvcError::from(err))?
+        .join("objects");
+    if !temp_objects_dir.exists() {
+        create_dir_all(&temp_objects_dir)
             .await
             .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-        tracing::debug!("sending blob file: {:?}", blob.hash);
-        send_file(ws, blob.hash.0.to_hex().as_str(), file).await?;
     }
-    let temp_dir = repo.temp_dir().await.map_err(WsvcError::FsError)?;
-    create_dir_all(temp_dir.join("objects"))
-        .await
-        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-    let mut blob_count = client_will_given_blobs.len();
-    let dir = temp_dir.join("objects");
-    while blob_count > 0 {
-        recv_file(ws, &dir).await?;
-        blob_count -= 1;
-    }
-
-    for blob in &client_will_given_blobs {
-        tracing::debug!("checking blob file: {:?}", blob);
-        if !blob
-            .checksum(&dir.join(blob.hash.0.to_hex().as_str()))
+    for i in wanted_blobs {
+        let object_file = objects_dir.join(i.hash.0.to_string());
+        let file = File::open(&object_file)
             .await
-            .map_err(WsvcError::FsError)?
-        {
+            .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
+        tracing::trace!("send blob file: {:?}", i);
+        send_file(ws, &i.hash.0.to_string(), file).await?;
+    }
+    for _ in 0..will_given_blobs.len() {
+        recv_file(ws, &temp_objects_dir).await?;
+    }
+    for i in will_given_blobs {
+        let object_file = temp_objects_dir.join(i.hash.0.to_string());
+        if !object_file.exists() {
             return Err(WsvcServerError::DataError(format!(
-                "blob {} checksum failed",
-                blob.hash.0.to_hex().as_str()
+                "blob file not exists: {:?}",
+                object_file
             )));
         }
     }
-
-    tracing::debug!("moving blob files to object database...");
-    let objects_dir = repo.objects_dir().await.map_err(WsvcError::FsError)?;
-    let mut entries = read_dir(&dir)
+    for i in will_given_blobs {
+        rename(
+            temp_objects_dir.join(i.hash.0.to_string()),
+            objects_dir.join(i.hash.0.to_string()),
+        )
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?
-    {
-        rename(entry.path(), objects_dir.join(entry.file_name()))
-            .await
-            .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
+    Ok(())
+}
+
+/// `sync_with` syncs repository with client.
+///
+/// - round 1: sync records. server send all records to client, client get records,
+///     and diff its own records with server's records, then send diff records to server.
+///     then server got the `wanted_records` and `will_given_records`
+/// - round 2: sync trees. server send all trees of `wanted_records` recursively to client,
+///     client get trees, and diff its own trees with server's trees, then send diff trees to server.
+/// - round 3: sync blobs list. server send all blobs meta of diff tree to client,
+///     client get blobs meta, and diff its own blobs meta with server's blobs meta, then send diff blobs meta to server.
+/// - round 4: sync blobs. server send all blobs of diff blobs meta to client,
+///     client send all blobs of diff blobs meta to server.
+/// - end process: server store all trees and blobs, then store all records.
+///
+/// when failed, both server and client should cleanup all temp files.
+///
+/// ## arguments
+///
+/// * `repo` - repository to sync with.
+/// * `ws` - websocket connection from axum.
+pub async fn sync_with(repo: &Repository, ws: &mut WebSocket) -> Result<(), WsvcServerError> {
+    let guard = RepoGuard::new(repo)
+        .await
+        .map_err(|err| WsvcError::FsError(err))?;
+    let (wanted_records, given_records) = sync_records(repo, ws).await?;
+    let (wanted_trees, given_trees) = sync_trees(repo, ws, wanted_records.as_slice()).await?;
+    let (wanted_blobs, will_given_blobs) =
+        sync_blobs_meta(repo, ws, wanted_trees.as_slice()).await?;
+    // now all wanted trees and blobs are ready in server's and client's memory, now we should sync blob files.
+    sync_blobs(
+        repo,
+        ws,
+        wanted_blobs.as_slice(),
+        will_given_blobs.as_slice(),
+    )
+    .await?;
 
     // store trees
     tracing::debug!("write trees to tree database...");
     let trees_dir = repo.trees_dir().await.map_err(WsvcError::FsError)?;
-    for tree in &new_trees {
+    for tree in &given_trees {
         write(
             trees_dir.join(tree.hash.0.to_hex().as_str()),
             serde_json::to_string(tree)
@@ -347,7 +428,7 @@ pub async fn sync_with(repo: Repository, ws: &mut WebSocket) -> Result<(), WsvcS
     // store records
     tracing::debug!("write records to record database...");
     let records_dir = repo.records_dir().await.map_err(WsvcError::FsError)?;
-    for record in &client_will_given_records {
+    for record in &given_records {
         write(
             records_dir.join(record.hash.0.to_hex().as_str()),
             serde_json::to_string(record)
@@ -356,5 +437,7 @@ pub async fn sync_with(repo: Repository, ws: &mut WebSocket) -> Result<(), WsvcS
         .await
         .map_err(|err| WsvcError::FsError(WsvcFsError::Os(err)))?;
     }
+
+    drop(guard);
     Ok(())
 }
