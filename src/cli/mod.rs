@@ -5,6 +5,7 @@ mod checkout;
 mod commit;
 mod create;
 mod logs;
+mod remote;
 mod transport;
 
 /// wsvc is a simple version control system.
@@ -13,7 +14,6 @@ mod transport;
 #[command(bin_name = "wsvc")]
 enum WsvcCli {
     /// record a snapshot of workspace.
-    #[command(name = "commit")]
     Commit {
         /// commit message
         #[clap(short, long)]
@@ -29,7 +29,6 @@ enum WsvcCli {
         root: Option<String>,
     },
     /// checkout a commit.
-    #[command(name = "checkout")]
     Checkout {
         /// the aim commit hash
         hash: Option<String>,
@@ -41,14 +40,12 @@ enum WsvcCli {
         root: Option<String>,
     },
     /// init a repo in current dir.
-    #[command(name = "init")]
     Init {
         /// whether init this repo as bare repo. if false (default), a .wsvc dir will be created to store the repo data
         #[clap(short, long)]
         bare: Option<bool>,
     },
     /// create a new wsvc project repo.
-    #[command(name = "new")]
     New {
         /// the new repo dir that will be created
         name: String,
@@ -77,6 +74,14 @@ enum WsvcCli {
     },
     /// sync a repository with remote origin
     Sync,
+    /// set remote origin
+    Remote {
+        /// optional root dir where stores the repo data, if not configured, current dir or .wsvc will be used
+        #[clap(short, long)]
+        root: Option<String>,
+        /// remote origin url
+        url: String,
+    },
 }
 
 #[derive(Parser)]
@@ -125,5 +130,6 @@ pub async fn run() -> Result<(), WsvcError> {
         WsvcCli::Logs { root, skip, limit } => logs::logs(root, skip, limit).await,
         WsvcCli::Clone { url, dir } => transport::clone(url, dir).await,
         WsvcCli::Sync => transport::sync().await,
+        WsvcCli::Remote { root, url } => remote::remote_set(root, url).await,
     }
 }

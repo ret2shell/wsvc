@@ -30,7 +30,7 @@ impl Drop for RepoGuard {
         let repo = self.repo.clone();
         let temp_dir = self.repo.path.join("temp");
         if temp_dir.exists() {
-          std::fs::remove_dir_all(temp_dir).ok();
+            std::fs::remove_dir_all(temp_dir).ok();
         }
         repo.unlock().ok();
     }
@@ -59,6 +59,8 @@ pub enum WsvcFsError {
     NoChanges(String),
     #[error("workspace is locked")]
     WorkspaceLocked,
+    #[error("remote not set")]
+    RemoteNotSet,
 }
 
 #[derive(Clone, Debug)]
@@ -202,9 +204,7 @@ async fn build_tree(root: &Path, work_dir: &Path) -> Result<TreeImpl, WsvcFsErro
             if entry.file_name() == ".wsvc" {
                 continue;
             }
-            result
-                .trees
-                .push(build_tree(root, &entry.path()).await?);
+            result.trees.push(build_tree(root, &entry.path()).await?);
         } else if entry_type.is_file() {
             result.blobs.push(
                 Blob {
@@ -456,7 +456,11 @@ impl Repository {
     }
 
     pub async fn tree_exists(&self, tree_hash: &ObjectId) -> Result<bool, WsvcFsError> {
-        Ok(self.trees_dir().await?.join(tree_hash.0.to_hex().as_str()).exists())
+        Ok(self
+            .trees_dir()
+            .await?
+            .join(tree_hash.0.to_hex().as_str())
+            .exists())
     }
 
     /// read a tree object from trees dir
@@ -644,10 +648,7 @@ impl Repository {
         Ok(result)
     }
 
-    pub async fn get_blobs_of_tree(
-        &self,
-        tree_hash: &ObjectId,
-    ) -> Result<Vec<Blob>, WsvcFsError> {
+    pub async fn get_blobs_of_tree(&self, tree_hash: &ObjectId) -> Result<Vec<Blob>, WsvcFsError> {
         let tree = self.read_tree(tree_hash).await?;
         let mut result = tree.blobs.clone();
         let mut queue = tree.trees;
@@ -701,7 +702,7 @@ impl Repository {
         // read remote repo url from ORIGIN
         tokio::fs::read_to_string(self.path.join("ORIGIN"))
             .await
-            .map_err(WsvcFsError::Os)
+            .map_err(|_| WsvcFsError::RemoteNotSet)
     }
 }
 
